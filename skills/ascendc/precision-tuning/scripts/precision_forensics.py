@@ -99,7 +99,7 @@ class OperatorExecutor:
         返回 {"stdout", "comparisons", "inputs_meta", "all_passed"}
         """
         result = subprocess.run(
-            [sys.executable, str(VERIF_SCRIPT), self.op_name],
+            [sys.executable, str(VERIF_SCRIPT), str(self.task_dir)],
             capture_output=True, text=True,
             cwd=str(REPO_ROOT),
             env={**os.environ,
