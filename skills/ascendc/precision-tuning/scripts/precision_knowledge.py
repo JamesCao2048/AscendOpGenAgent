@@ -44,6 +44,10 @@ import json
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = _SCRIPT_DIR.parent.parent.parent
 
 
 VALID_TYPES = [
@@ -347,13 +351,13 @@ def _empty_search_result(op_type, pattern, position, top_k) -> dict:
 # Dump (仅精度通过时调用)
 # ============================================================
 
-def dump_success_knowledge(kb_path: str, output_path: str, op_name: str) -> dict | None:
+def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str) -> dict | None:
     """
     从 Agent 生成的候选知识库条目追加到知识库。
 
     读取:
-      - {output_path}/precision_tuning/candidate_kb_entry.json (Agent 生成的候选条目)
-      - {output_path}/precision_tuning/forensics_report.json (用于补充元数据)
+      - {task_dir}/precision_tuning/candidate_kb_entry.json (Agent 生成的候选条目)
+      - {task_dir}/precision_tuning/forensics_report.json (用于补充元数据)
 
     逻辑:
       1. 读取候选条目 JSON，验证五字段完整性
@@ -362,7 +366,7 @@ def dump_success_knowledge(kb_path: str, output_path: str, op_name: str) -> dict
       4. 按 title 去重
       5. 追加到知识库文件
     """
-    tuning_dir = os.path.join(output_path, "precision_tuning")
+    tuning_dir = os.path.join(task_dir, "precision_tuning")
 
     # 1. 读取 Agent 生成的候选条目
     candidate_path = os.path.join(tuning_dir, "candidate_kb_entry.json")
@@ -514,7 +518,8 @@ def main():
     # dump
     p_dump = subparsers.add_parser("dump", help="成功后写入知识库")
     p_dump.add_argument("--kb-path", required=True, help="知识库 JSON 路径")
-    p_dump.add_argument("--output-path", required=True, help="算子输出目录")
+    p_dump.add_argument("--task-name", required=True, help="task 目录名")
+    p_dump.add_argument("--task-dir", default=None, help="task 绝对路径，默认 {REPO_ROOT}/{task_name}")
     p_dump.add_argument("--op-name", required=True, help="算子名称")
 
     args = parser.parse_args()
@@ -542,7 +547,8 @@ def main():
                 attempt=getattr(args, "attempt", None),
             )
     elif args.command == "dump":
-        dump_success_knowledge(args.kb_path, args.output_path, args.op_name)
+        task_dir = args.task_dir or str(REPO_ROOT / args.task_name)
+        dump_success_knowledge(args.kb_path, task_dir, args.op_name)
 
 
 if __name__ == "__main__":
