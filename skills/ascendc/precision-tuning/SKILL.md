@@ -25,15 +25,20 @@ subagent:
 
 ## When to use me
 
-当 ascendc-evaluation 的 evaluate.py 报告 correctness 失败时。
-前提: 算子已通过编译 (generate_pybind.py 成功), 可以运行但精度不通过。
+当 `evaluate_ascendc.sh` 报告 Numerical 失败时（非 Build/Import 失败）。
+前提: `{task_dir}/kernel/pybind11.cpp` 已存在且编译通过，运行但精度不通过。
 
 ## Prerequisites
 
-- `{output_path}/{op_name}_reference.py` — 含 Model, get_inputs, get_init_inputs
-- `{output_path}/{op_name}_custom.py` — 含 ModelNew
-- `{output_path}/{OpName}Custom/` — 已编译的 AscendC 项目
-- evaluate.py 已报告 correctness 失败
+- `{task_dir}/model.py` — 参考实现（含 Model, get_input_groups/get_inputs, get_init_inputs）
+- `{task_dir}/model_new_ascendc.py` — AscendC wrapper（含 ModelNew）
+- `{task_dir}/kernel/pybind11.cpp` — host launch + pybind
+- `{task_dir}/kernel/{op_name}_tiling.h` — TilingData 定义
+- `{task_dir}/kernel/*.cpp` + `*_kernel.h` — 至少一个非 pybind kernel 文件
+- `{task_dir}/{op_name}.json` — 测试用例（JSON Lines）
+- `evaluate_ascendc.sh` 已报告 Numerical 失败（非 Build/Import 失败）
+
+其中 `task_dir = {repo_root}/{task_name}`，`repo_root` 为 AscendOpGenAgent 仓库根目录。
 
 ## Workflow
 
@@ -49,90 +54,54 @@ subagent:
 
 **0.1 保存不可变基线快照（原始代码，仅首次执行）:**
 ```bash
-if [ ! -d "{output_path}/precision_tuning/history/baseline/code_snapshot" ]; then
-    mkdir -p "{output_path}/precision_tuning/history/baseline/code_snapshot"
-    cp "{output_path}/{OpName}Custom/op_kernel/{op_name}_custom.cpp" \
-       "{output_path}/precision_tuning/history/baseline/code_snapshot/op_kernel.cpp"
-    cp "{output_path}/{OpName}Custom/op_host/{op_name}_custom.cpp" \
-       "{output_path}/precision_tuning/history/baseline/code_snapshot/op_host.cpp"
-    cp "{output_path}/{OpName}Custom/op_host/{op_name}_custom_tiling.h" \
-       "{output_path}/precision_tuning/history/baseline/code_snapshot/op_tiling.h"
-    cp "{output_path}/{op_name}.cpp" \
-       "{output_path}/precision_tuning/history/baseline/code_snapshot/op_pybind.cpp"
+if [ ! -d "{task_dir}/precision_tuning/history/baseline/code_snapshot" ]; then
+    mkdir -p "{task_dir}/precision_tuning/history/baseline/code_snapshot"
+    cp -r "{task_dir}/kernel/" \
+       "{task_dir}/precision_tuning/history/baseline/code_snapshot/kernel/"
+    cp "{task_dir}/model_new_ascendc.py" \
+       "{task_dir}/precision_tuning/history/baseline/code_snapshot/model_new_ascendc.py"
     echo "基线快照已保存，后续可从 baseline 恢复"
 fi
 ```
 
 > 基线快照保存在 `history/baseline/code_snapshot/`，整个调优过程中**不覆盖**。如需恢复到最初始状态，使用以下命令：
 > ```bash
-> cp "{output_path}/precision_tuning/history/baseline/code_snapshot/op_kernel.cpp" \
->    "{output_path}/{OpName}Custom/op_kernel/{op_name}_custom.cpp"
-> cp "{output_path}/precision_tuning/history/baseline/code_snapshot/op_host.cpp" \
->    "{output_path}/{OpName}Custom/op_host/{op_name}_custom.cpp"
-> cp "{output_path}/precision_tuning/history/baseline/code_snapshot/op_tiling.h" \
->    "{output_path}/{OpName}Custom/op_host/{op_name}_custom_tiling.h"
-> cp "{output_path}/precision_tuning/history/baseline/code_snapshot/op_pybind.cpp" \
->    "{output_path}/{op_name}.cpp"
+> cp -r "{task_dir}/precision_tuning/history/baseline/code_snapshot/kernel/" \
+>    "{task_dir}/kernel/"
+> cp "{task_dir}/precision_tuning/history/baseline/code_snapshot/model_new_ascendc.py" \
+>    "{task_dir}/model_new_ascendc.py"
 > ```
 
 **0.2 保存本轮起始快照:**
 ```bash
-mkdir -p "{output_path}/precision_tuning/history/attempt_0/code_snapshot"
-cp "{output_path}/{OpName}Custom/op_kernel/{op_name}_custom.cpp" \
-   "{output_path}/precision_tuning/history/attempt_0/code_snapshot/op_kernel.cpp"
-cp "{output_path}/{OpName}Custom/op_host/{op_name}_custom.cpp" \
-   "{output_path}/precision_tuning/history/attempt_0/code_snapshot/op_host.cpp"
-cp "{output_path}/{OpName}Custom/op_host/{op_name}_custom_tiling.h" \
-   "{output_path}/precision_tuning/history/attempt_0/code_snapshot/op_tiling.h"
-cp "{output_path}/{op_name}.cpp" \
-   "{output_path}/precision_tuning/history/attempt_0/code_snapshot/op_pybind.cpp"
+mkdir -p "{task_dir}/precision_tuning/history/attempt_0/code_snapshot"
+cp -r "{task_dir}/kernel/" \
+   "{task_dir}/precision_tuning/history/attempt_0/code_snapshot/kernel/"
+cp "{task_dir}/model_new_ascendc.py" \
+   "{task_dir}/precision_tuning/history/attempt_0/code_snapshot/model_new_ascendc.py"
 ```
 
 > 知识库将在 Sub-step 2.1 完成后通过 `search` 命令按需检索, 无需在此全量加载。
 
 ---
 
-### Step 1: 编译 + 安装 + 精度取证
-
-#### 1.0 编译并安装算子运行环境（取证前必须执行）
-
-精度取证脚本需要加载已编译的算子 `.so`，必须先完成编译和安装。
-
-**1.0.1 安装算子包:**
-```bash
-bash "{output_path}/{OpName}Custom/build_out/custom_opp_ubuntu_aarch64.run" \
-    --install-path="{output_path}"
-```
-
-**1.0.2 编译并生成 Python 绑定:**
-```bash
-python3 .opencode/skills/ascendc-evaluation/scripts/generate_pybind.py \
-    {op_name} --output-path "{output_path}"
-```
-
-**编译失败处理：**
-- **attempt=0（初始代码）**：初始代码本不应有编译错误（前置条件要求已通过编译），检查环境变量和路径后停止，报告错误。不进行编译重试，这里不应该失败。
-- **attempt>0（修复后代码）**：理论上 Step 4 已编译成功过，此处编译失败属于异常，检查 Step 4 的编译是否真正成功，停止并报告。
-
-> ⚠️ **此处不进行编译重试**。编译重试机制在 Step 4（代码修改后的编译验证）中执行，最多允许 3 次重试。Step 1.0 仅做一次编译——如失败说明环境或代码状态不符合预期。
-
----
+### Step 1: 精度取证
 
 #### 1.1 精度取证 (Python 脚本, 不可跳过)
 
 ```bash
-python3 .opencode/skills/precision-tuning/scripts/precision_forensics.py \
-    {op_name} --output-path "{output_path}" --attempt {attempt}
+python3 skills/ascendc/precision-tuning/scripts/precision_forensics.py \
+    {task_name} --attempt {attempt}
 ```
 
 Gate 验证:
 ```bash
-python3 .opencode/skills/precision-tuning/scripts/precision_gate.py \
-    --step forensics --op-name {op_name} --output-path "{output_path}" --attempt {attempt}
+python3 skills/ascendc/precision-tuning/scripts/precision_gate.py \
+    --step forensics --op-name {op_name} --task-name {task_name} --attempt {attempt}
 ```
 
 ⛔ **Gate-F 未通过 → 停止, 检查错误输出。不要在没有取证数据的情况下分析代码。**
-如果报错含 `ImportError` / `ModuleNotFoundError` / `FileNotFoundError`，先确认 Step 1.0 编译和安装是否真正成功，再排查 NPU 环境变量（ASCEND_CUSTOM_OPP_PATH）。
+如果报错含 `FileNotFoundError`，先确认 `{task_dir}/kernel/pybind11.cpp` 存在，再检查 `utils/verification_ascendc.py` 路径。
 
 ---
 
@@ -140,13 +109,13 @@ python3 .opencode/skills/precision-tuning/scripts/precision_gate.py \
 
 **本步骤分为 4 个 Sub-step, 每个 Sub-step 有明确的输入文件和产出 section, 不可跳过或合并。**
 
-将全部分析结果写入 `{output_path}/precision_tuning/precision_audit_{attempt}.md`。
+将全部分析结果写入 `{task_dir}/precision_tuning/precision_audit_{attempt}.md`。
 
 **历史扫描（attempt > 0 时必须执行，首轮跳过）：**
 
 **第一步：读方向学习表（一次读完，直接获得跨轮全貌）**
 ```bash
-cat "{output_path}/precision_tuning/tuning_directions.json"
+cat "{task_dir}/precision_tuning/tuning_directions.json"
 ```
 
 从 `tuning_directions.json` 一次性获得：
@@ -162,7 +131,7 @@ cat "{output_path}/precision_tuning/tuning_directions.json"
 **第二步：按需深入（仅在确实需要时通过 round_summary 的 index 定位）**
 ```bash
 # 读某轮的 round_summary 获取文件路径索引
-cat "{output_path}/precision_tuning/round_summary_{N}.json"
+cat "{task_dir}/precision_tuning/round_summary_{N}.json"
 # 再按 index.sections.* 路径读对应的 section 小文件
 ```
 
@@ -176,7 +145,7 @@ cat "{output_path}/precision_tuning/round_summary_{N}.json"
 
 #### Sub-step 2.1: 取证数据解读
 
-**读取**: `{output_path}/precision_tuning/forensics_report_{attempt}.json`
+**读取**: `{task_dir}/precision_tuning/forensics_report_{attempt}.json`
 
 **产出**: `[FORENSICS_SUMMARY]` section
 
@@ -208,8 +177,7 @@ cat "{output_path}/precision_tuning/round_summary_{N}.json"
     - 该类型的 checklist: <将在下方 search 命令中自动返回>
   可用文件:
     - reference: <来自取证 available_files.reference>
-    - dsl: <来自取证 available_files.dsl>
-    - op_desc: <来自取证 available_files.op_desc>
+    - custom: <来自取证 available_files.custom>
   dtype 精度级别判断:
     - dtype: <来自取证 outputs[0] 或 L8_operator, 如 float32/float16/bfloat16>
     - max_abs_diff (来自取证): <值>
@@ -228,12 +196,12 @@ cat "{output_path}/precision_tuning/round_summary_{N}.json"
 
 从 `[FORENSICS_SUMMARY]` 中提取 `primary_hint` 和 `op_type`, 检索相关知识条目:
 ```bash
-python3 .opencode/skills/precision-tuning/scripts/precision_knowledge.py search \
-    --kb-path .opencode/skills/precision-tuning/references/precision_knowledge_base.json \
+python3 skills/ascendc/precision-tuning/scripts/precision_knowledge.py search \
+    --kb-path skills/ascendc/precision-tuning/references/precision_knowledge_base.json \
     --op-type <L8_operator.op_type> \
     --pattern <primary_hint> \
     --top-k 3 \
-    --log-path "{output_path}/precision_tuning" \
+    --log-path "{task_dir}/precision_tuning" \
     --attempt {attempt} \
     --call-index 0
 ```
@@ -246,11 +214,8 @@ python3 .opencode/skills/precision-tuning/scripts/precision_knowledge.py search 
 #### Sub-step 2.2: 算子计算流程分解
 
 **读取** (按顺序):
-1. `{output_path}/{op_name}_reference.py` — 参考实现的 forward() 逻辑
-2. `{output_path}/{op_name}_dsl.py` — DSL tiling 策略和 kernel 计算步骤 (如果 available_files.dsl=true)
-3. `{output_path}/{op_name}_op_desc.json` — 算子属性 (如果 available_files.op_desc=true)
-4. `.opencode/skills/precision-tuning/references/decomposition_examples/README.md` — 分解示例索引
-5. 查找与当前算子最匹配的分解示例文件 (如 `softmax.md`, `layer_norm.md` 等)
+1. `{task_dir}/model.py` — 参考实现的 forward() 逻辑
+2. `archive_tasks/` 中最近似案例的 `model.py`（可选，用于对比计算链）
 
 **产出**: `[COMPUTATION_DECOMPOSITION]` section
 
@@ -277,7 +242,6 @@ python3 .opencode/skills/precision-tuning/scripts/precision_knowledge.py search 
 
     Step 1: <operation_name>
       - 来源: reference.py 中的 <具体函数/表达式>
-      - DSL 对应: dsl.py 中的 <具体 tl.xxx 调用> (如 DSL 不存在则标注 "DSL 不可用")
       - 输入: <上一步输出 / 原始输入>
       - 输出 shape: <shape>
       - 数值范围预期: <基于输入范围推断>
@@ -289,13 +253,6 @@ python3 .opencode/skills/precision-tuning/scripts/precision_knowledge.py search 
 
     Step N: 最终输出
       - 与取证报告的 golden output 统计对照
-
-  DSL 文件状态: 存在 / 不存在
-  DSL tiling 策略摘要: (如 DSL 存在)
-    - n_cores: <值>
-    - tiling 维度和参数: <如 tile_length, rows_per_core 等>
-    - 归约维是否在单核内完整处理: 是 / 否
-    - UB buffer 数量和大小: <列出>
 
   跨核通信: (仅跨核归约模式)
     - workspace buffer: <是否存在, 大小>
@@ -312,15 +269,25 @@ python3 .opencode/skills/precision-tuning/scripts/precision_knowledge.py search 
 
 **Phase A 读取**:
 
-1. 根据 `L8_operator.op_type` 定位对应的 lowering 示例 (必须读取完整文件):
-   - `softmax` → `.opencode/skills/dsl-lowering/references/lowering_examples/softmax/softmax_process_example_for_lowering.md`
-   - `mse_loss` / loss 类 → `.opencode/skills/dsl-lowering/references/lowering_examples/mse_loss/mse_loss_process_example_for_lowering.md`
-   - `average_pooling2d` / pooling 类 → `.opencode/skills/dsl-lowering/references/lowering_examples/pooling/pooling_process_example_for_lowering.md`
-   - `leaky_relu` / 逐元素类 → `.opencode/skills/dsl-lowering/references/lowering_examples/leaky_relu/leaky_relu_process_example_for_lowering.md`
-   - 无精确匹配 → 读取最接近的示例 (优先选同类计算模式)
-2. **必须读取**: `.opencode/skills/dsl-lowering/references/error_correction/error_correction_examples.md`
-3. **必须读取**: `.opencode/skills/dsl-lowering/references/lowering_examples/non_aligned/non_aligned_example_for_lowering.md`
-4. **必须读取**: `.opencode/skills/dsl-lowering/references/ascend_api/tl_asc_routing.md` — AscendC API 权威参考
+1. 根据 `L8_operator.op_type` 从 `archive_tasks/` 路由，读取对应案例的 `kernel/` 目录（仅含有完整 kernel/ 的案例）：
+   - pooling → `archive_tasks/avg_pool3_d/kernel/`
+   - normalization / rmsnorm / layernorm → `archive_tasks/rms_norm/kernel/`（含 vector_tile.h）
+   - matmul / gemm / linear → `archive_tasks/matmul_leakyrelu/kernel/` 或 `archive_tasks/quant_matmul/kernel/`
+   - gather / scatter / index → `archive_tasks/gather_elements_v2/kernel/`
+   - concat / memory layout → `archive_tasks/concat_dv2/kernel/`
+   - **attention / softmax** → 无有效 AscendC 案例，跳过案例读取，仅读 API 文档
+   - **纯 elementwise / activation** → 无纯向量案例，仅读 `dsl2Ascendc_compute_vector.md`
+   - 无精确匹配 → 选最近似案例，在 [REFERENCE_IMPL_SPEC] 中标注"参考案例非精确匹配"
+
+2. **必须读取**: `skills/ascendc/ascendc-translator/references/dsl2Ascendc.md`
+   （替代 error_correction_examples.md，含禁用 API 模式和常见错误）
+
+3. **必须读取**: `skills/ascendc/ascendc-translator/references/dsl2Ascendc_compute_vector.md`
+   （含 DataCopyPad 触发条件和非对齐处理）
+
+4. **必须读取**: `skills/ascendc/ascendc-translator/references/TileLang-AscendC-API-Mapping.md`
+   （AscendC API 权威参考）
+   API 详细文档：`skills/ascendc/ascendc-translator/references/AscendC_knowledge/api_reference/`
 
 **Phase A 产出**: `[REFERENCE_IMPL_SPEC]` section (写入 precision_audit_{attempt}.md, Gate-A 必填)
 
@@ -358,10 +325,14 @@ python3 .opencode/skills/precision-tuning/scripts/precision_knowledge.py search 
 
 **Phase B: 读取当前实现**
 
-**读取**:
-1. `{output_path}/{OpName}Custom/op_kernel/{op_name}_custom.cpp` — Kernel 代码
-2. `{output_path}/{OpName}Custom/op_host/{op_name}_custom.cpp` — Host 代码 (TilingFunc)
-3. `{output_path}/{OpName}Custom/op_host/{op_name}_custom_tiling.h` — TilingData 结构体定义 (字段名、类型、大小)
+**Phase B 读取** (全部在 `{task_dir}/kernel/` 下):
+1. `{op_name}_tiling.h` — TilingData 结构体定义
+2. `*_kernel.h` — 所有 kernel 类定义（可能有多个）
+3. `*.cpp`（排除 pybind11.cpp）— 所有 kernel entry 文件
+4. `kernel_common.h`、`vector_tile.h`、`matmul_tile.h`（若存在）— helper 逻辑
+5. `pybind11.cpp` — host tiling 计算、workspace 分配、launch 逻辑
+
+注意：AscendOpGenAgent 中 host 逻辑（TilingFunc）在 pybind11.cpp 内，不是单独的 op_host.cpp。
 
 **产出**: `[REFERENCE_IMPL_SPEC]` + `[KERNEL_STEP_TRACE]` sections
 
@@ -381,7 +352,7 @@ python3 .opencode/skills/precision-tuning/scripts/precision_knowledge.py search 
 [KERNEL_STEP_TRACE]
   Kernel 计算步骤 (从 Compute() 函数提取):
     K-Step 1: <AscendC API 名称>
-      - 代码位置: op_kernel.cpp 第 <line> 行
+      - 代码位置: <kernel 文件名>.cpp 第 <line> 行
       - 参数: count=<value>, src=<buffer>, dst=<buffer>
       - 对应计算链: Step <N> (<operation_name>)
       - 匹配状态: ✅ 匹配 / ⚠️ 参数偏差: <描述> / ❌ 缺失或多余
@@ -391,10 +362,8 @@ python3 .opencode/skills/precision-tuning/scripts/precision_knowledge.py search 
 
   Host tiling 参数:
     - TilingData 结构体字段: <从 _tiling.h 中列出所有字段名和类型>
-    - tileLength = <值> (来源: op_host.cpp TilingFunc 第 <line> 行)
+    - tileLength = <值> (来源: pybind11.cpp TilingFunc 第 <line> 行)
     - 其他 TilingData 字段: <列出 field=value>
-    - DSL 中对应参数: <tile_length=值, rows_per_core=值 等>
-    - Host vs DSL 是否一致: 是 / 否 (差异: ...)
     - 归约维度完整性: tileLength <>=<> 归约轴长度 <length> → 完整 / 被切分
 
   跨核通信验证: (仅跨核归约模式)
@@ -462,13 +431,13 @@ python3 .opencode/skills/precision-tuning/scripts/precision_knowledge.py search 
 - 若无明显位置特征 → 不传 `--position`
 
 ```bash
-python3 .opencode/skills/precision-tuning/scripts/precision_knowledge.py search \
-    --kb-path .opencode/skills/precision-tuning/references/precision_knowledge_base.json \
+python3 skills/ascendc/precision-tuning/scripts/precision_knowledge.py search \
+    --kb-path skills/ascendc/precision-tuning/references/precision_knowledge_base.json \
     --op-type <L8_operator.op_type> \
     --pattern <primary_hint> \
     --position <tail/boundary/scattered 或不传> \
     --top-k 3 \
-    --log-path "{output_path}/precision_tuning" \
+    --log-path "{task_dir}/precision_tuning" \
     --attempt {attempt} \
     --call-index 1
 ```
@@ -479,7 +448,7 @@ python3 .opencode/skills/precision-tuning/scripts/precision_knowledge.py search 
 
 **要求**: 根因判断必须基于 2.1~2.3 的具体发现, 不允许"凭直觉"给出根因。证据链中必须引用具体的 K-Step 编号和取证数据字段。
 
-> ⚠️ **写 [FIX_PLAN] 前必须查阅 `tl_asc_routing.md`，核实所有将要使用的 AscendC API 名称**：
+> ⚠️ **写 [FIX_PLAN] 前必须查阅 `TileLang-AscendC-API-Mapping.md`，核实所有将要使用的 AscendC API 名称**：
 > - 逐元素向量最大值：`Max`（不是 `Vmax`，该 API 不存在）
 > - 逐元素减法：`Sub`（无 `Subs`），逐元素除法：`Div`（无 `Divs`）
 > - float32 负无穷：`-3.402823466e+38f` 或 `(float)(-INFINITY)`（不是 `AscendC::INFINITY`，该常量不存在）
@@ -537,8 +506,8 @@ python3 .opencode/skills/precision-tuning/scripts/precision_knowledge.py search 
 
 Gate 验证:
 ```bash
-python3 .opencode/skills/precision-tuning/scripts/precision_gate.py \
-    --step audit --op-name {op_name} --output-path "{output_path}" --attempt {attempt}
+python3 skills/ascendc/precision-tuning/scripts/precision_gate.py \
+    --step audit --op-name {op_name} --task-name {task_name} --attempt {attempt}
 ```
 
 ⛔ **Gate-A 未通过 → 补全缺失的 section, 不计入轮次。Gate-A 现在检查 7 个必填 section: FORENSICS_SUMMARY, COMPUTATION_DECOMPOSITION, REFERENCE_IMPL_SPEC, KERNEL_STEP_TRACE, ROOT_CAUSE, FIX_PLAN, TARGET_FILES。**
@@ -559,8 +528,8 @@ python3 .opencode/skills/precision-tuning/scripts/precision_gate.py \
 
 修复完成后, Gate 验证代码文件完整性:
 ```bash
-python3 .opencode/skills/precision-tuning/scripts/precision_gate.py \
-    --step fix --op-name {op_name} --output-path "{output_path}" --attempt {attempt}
+python3 skills/ascendc/precision-tuning/scripts/precision_gate.py \
+    --step fix --op-name {op_name} --task-name {task_name} --attempt {attempt}
 ```
 
 ⛔ **Gate-X 未通过 → 检查文件是否正确保存。**
@@ -569,72 +538,53 @@ python3 .opencode/skills/precision-tuning/scripts/precision_gate.py \
 
 ### Step 4: 重新编译 + 精度验证
 
-**4.1 安装算子运行环境:**
 ```bash
-bash "{output_path}/{OpName}Custom/build_out/custom_opp_ubuntu_aarch64.run" \
-    --install-path="{output_path}"
+bash skills/ascendc/ascendc-translator/references/evaluate_ascendc.sh {task_name}
 ```
 
-**4.2 重新编译:**
-```bash
-python3 .opencode/skills/ascendc-evaluation/scripts/generate_pybind.py \
-    {op_name} --output-path "{output_path}"
+**失败分类处理**（根据 stdout 判断）：
+
+| 失败类型 | 特征 | 处理 |
+|---|---|---|
+| Infra 失败 | SSH 超时、docker exec 失败 | 停止，报告环境问题，不进入修复循环 |
+| Build 失败 | `build_ascendc.py` 报编译错误 | 修复 kernel .cpp/.h，最多 3 次 |
+| Import 失败 | import 阶段报 ModuleNotFoundError 或 PYBIND11_MODULE 名不一致 | 检查 model_new_ascendc.py import 名 vs pybind11.cpp |
+| Numerical 失败 | verification_ascendc.py 报 mismatch | 进入 precision_forensics → 审计 → 修复循环 |
+
+**每次编译失败后，更新 `{task_dir}/precision_tuning/compilation_log_{attempt}.json`**（追加 entry）：
+```json
+{
+  "attempt": <N>,
+  "entries": [
+    {
+      "compile_retry": <0/1/2>,
+      "error_category": "<undefined_api|type_mismatch|count_alignment|other_compile>",
+      "error_snippet": "<编译器报错核心行，最多3行>",
+      "fix_applied": "<本次修复简述>"
+    }
+  ]
+}
 ```
 
-如果编译失败:
-- 分析编译错误, 修复代码 (最多 3 次编译重试, 对齐 dsl-lowering 模式)
-- **每次编译失败后, 更新 `{output_path}/precision_tuning/compilation_log_{attempt}.json`** (读取已有文件追加 entry，不存在则初始化，整体覆盖写入):
-  ```json
-  {
-    "attempt": <N>,
-    "entries": [
-      {
-        "compile_retry": <0/1/2>,
-        "error_category": "<undefined_api|type_mismatch|count_alignment|other_compile>",
-        "error_snippet": "<编译器报错的核心行, 最多3行>",
-        "fix_applied": "<本次修复的简要描述>"
-      }
-    ]
-  }
-  ```
-  `error_category` 选择规则:
-  - `undefined_api`: 含 `error: 'Vmax' was not declared` / `undeclared identifier` 等 API 不存在错误
-  - `type_mismatch`: 含 `cannot convert` / `no matching function` 等类型不匹配
-  - `count_alignment`: 含 `count must be multiple of` / `alignment` 等对齐要求
-  - `other_compile`: 其他编译错误
-- 如果 3 次仍编译失败 → 从 `code_snapshot` 恢复, 回到 Step 2 重新审计
-
-**4.3 精度验证:**
-```bash
-python3 .opencode/skills/ascendc-evaluation/scripts/evaluate.py \
-    {op_name} --output-path "{output_path}"
-```
-
-**4.4 保存验证结果:**
-
-解析 evaluate.py 的 stdout, 提取 correctness 结果。
-evaluate.py 通过时输出形如 `[PASS]\nOutput 0: shape=..., match_rate=100.00% (N/N), max_diff=..., mean_diff=...`。
-evaluate.py 失败时输出形如 `[FAIL] Output 0 mismatch\nMatch rate: 87.50% (3500/4000)\nExample mismatch at index ...`。
-
-将结果写入 `{output_path}/precision_tuning/validation_result_attempt_{attempt}.json`:
+**保存验证结果**（从 stdout 解析，写入 `{task_dir}/precision_tuning/validation_result_attempt_{attempt}.json`）：
 ```json
 {
   "attempt": <N>,
   "correctness_passed": true/false,
-  "evaluate_stdout": "<evaluate.py 完整输出>",
-  "match_rate": "<从 stdout 用正则提取, 形如 87.50 或 100.00 的百分比数值>",
-  "max_diff": "<从 stdout 用正则提取, 形如 1.23e-04 的科学记数法数值>"
+  "evaluate_stdout": "<evaluate_ascendc.sh 完整输出>",
+  "match_rate": "<从 stdout 提取，如 87.50 或 100.00>",
+  "max_diff": "<从 stdout 提取，如 1.23e-04>"
 }
 ```
 
-提取规则:
-- `match_rate`: 用正则 `r"match_rate[=:]?\s*(\d+\.?\d*)%"` 提取百分比数值（不带百分号）；如果是 PASS 输出则写 `100.0`
-- `max_diff`: 用正则 `r"max_diff[=:]?\s*([0-9.eE+-]+)"` 提取数值；如果是 PASS 输出则写 `0.0`
+提取规则（`verification_ascendc.py` 输出格式）：
+- `match_rate`: 用正则 `r"mismatch_ratio=([0-9.]+)%"` 取所有 case 平均，转换为 match_rate = 100 - avg_mismatch；若无 mismatch 行则写 `100.0`
+- `max_diff`: 用正则 `r"max_abs_diff=([0-9.eE+\-g]+)"`；若无 mismatch 行则写 `0.0`
 
-**4.5 Gate 验证 + 循环控制:**
+**Gate 验证 + 循环控制:**
 ```bash
-python3 .opencode/skills/precision-tuning/scripts/precision_gate.py \
-    --step validate --op-name {op_name} --output-path "{output_path}" --attempt {attempt}
+python3 skills/ascendc/precision-tuning/scripts/precision_gate.py \
+    --step validate --op-name {op_name} --task-name {task_name} --attempt {attempt}
 ```
 
 Gate-V 输出包含 **loop_signal**, 你**必须遵守**:
@@ -654,45 +604,37 @@ Gate-V 输出包含 **loop_signal**, 你**必须遵守**:
 **每次归档时，比较当前轮 match_rate 与历史最佳，决定是否更新最佳代码。**
 
 ```bash
-# 1. 保存本轮取证报告和审计报告（数字命名文件已是持久化的，cp 到 history 供统一目录访问）
-mkdir -p "{output_path}/precision_tuning/history/attempt_{attempt}"
-cp "{output_path}/precision_tuning/forensics_report_{attempt}.json" \
-   "{output_path}/precision_tuning/history/attempt_{attempt}/forensics_report.json"
-cp "{output_path}/precision_tuning/precision_audit_{attempt}.md" \
-   "{output_path}/precision_tuning/history/attempt_{attempt}/precision_audit.md"
+# 1. 保存本轮取证报告和审计报告
+mkdir -p "{task_dir}/precision_tuning/history/attempt_{attempt}"
+cp "{task_dir}/precision_tuning/forensics_report_{attempt}.json" \
+   "{task_dir}/precision_tuning/history/attempt_{attempt}/forensics_report.json"
+cp "{task_dir}/precision_tuning/precision_audit_{attempt}.md" \
+   "{task_dir}/precision_tuning/history/attempt_{attempt}/precision_audit.md"
 
-# 2. 更新最佳代码（比较当前轮 match_rate 与 history/current_best/match_rate.txt）
-current_mr=$(python3 -c "import json; r=json.load(open('{output_path}/precision_tuning/validation_result_attempt_{attempt}.json')); print(r.get('match_rate', '0'))")
+# 2. 更新最佳代码
+current_mr=$(python3 -c "import json; r=json.load(open('{task_dir}/precision_tuning/validation_result_attempt_{attempt}.json')); print(r.get('match_rate', '0'))")
 best_mr=0
-if [ -f "{output_path}/precision_tuning/history/current_best/match_rate.txt" ]; then
-    best_mr=$(cat "{output_path}/precision_tuning/history/current_best/match_rate.txt")
+if [ -f "{task_dir}/precision_tuning/history/current_best/match_rate.txt" ]; then
+    best_mr=$(cat "{task_dir}/precision_tuning/history/current_best/match_rate.txt")
 fi
 
 is_better=$(python3 -c "print('yes' if float('$current_mr') >= float('$best_mr') else 'no')")
 if [ "$is_better" = "yes" ]; then
-    mkdir -p "{output_path}/precision_tuning/history/current_best/code_snapshot"
-    cp "{output_path}/{OpName}Custom/op_kernel/{op_name}_custom.cpp" \
-       "{output_path}/precision_tuning/history/current_best/code_snapshot/op_kernel.cpp"
-    cp "{output_path}/{OpName}Custom/op_host/{op_name}_custom.cpp" \
-       "{output_path}/precision_tuning/history/current_best/code_snapshot/op_host.cpp"
-    cp "{output_path}/{OpName}Custom/op_host/{op_name}_custom_tiling.h" \
-       "{output_path}/precision_tuning/history/current_best/code_snapshot/op_tiling.h"
-    cp "{output_path}/{op_name}.cpp" \
-       "{output_path}/precision_tuning/history/current_best/code_snapshot/op_pybind.cpp"
-    echo "$current_mr" > "{output_path}/precision_tuning/history/current_best/match_rate.txt"
+    mkdir -p "{task_dir}/precision_tuning/history/current_best/code_snapshot"
+    cp -r "{task_dir}/kernel/" \
+       "{task_dir}/precision_tuning/history/current_best/code_snapshot/kernel/"
+    cp "{task_dir}/model_new_ascendc.py" \
+       "{task_dir}/precision_tuning/history/current_best/code_snapshot/model_new_ascendc.py"
+    echo "$current_mr" > "{task_dir}/precision_tuning/history/current_best/match_rate.txt"
     echo "精度改善: $best_mr → $current_mr，已更新最佳代码"
 fi
 
 # 3. 保存下一轮的起始快照
-mkdir -p "{output_path}/precision_tuning/history/attempt_{next_attempt}/code_snapshot"
-cp "{output_path}/{OpName}Custom/op_kernel/{op_name}_custom.cpp" \
-   "{output_path}/precision_tuning/history/attempt_{next_attempt}/code_snapshot/op_kernel.cpp"
-cp "{output_path}/{OpName}Custom/op_host/{op_name}_custom.cpp" \
-   "{output_path}/precision_tuning/history/attempt_{next_attempt}/code_snapshot/op_host.cpp"
-cp "{output_path}/{OpName}Custom/op_host/{op_name}_custom_tiling.h" \
-   "{output_path}/precision_tuning/history/attempt_{next_attempt}/code_snapshot/op_tiling.h"
-cp "{output_path}/{op_name}.cpp" \
-   "{output_path}/precision_tuning/history/attempt_{next_attempt}/code_snapshot/op_pybind.cpp"
+mkdir -p "{task_dir}/precision_tuning/history/attempt_{next_attempt}/code_snapshot"
+cp -r "{task_dir}/kernel/" \
+   "{task_dir}/precision_tuning/history/attempt_{next_attempt}/code_snapshot/kernel/"
+cp "{task_dir}/model_new_ascendc.py" \
+   "{task_dir}/precision_tuning/history/attempt_{next_attempt}/code_snapshot/model_new_ascendc.py"
 ```
 
 然后 `attempt += 1`, 回到 Step 1。
@@ -705,31 +647,27 @@ cp "{output_path}/{op_name}.cpp" \
 
 **5.0 归档当前轮次 + 更新 current_best（PASS 时必须执行）:**
 ```bash
-# 归档本轮取证报告和审计报告（与 CONTINUE 时的归档逻辑一致）
-mkdir -p "{output_path}/precision_tuning/history/attempt_{attempt}"
-cp "{output_path}/precision_tuning/forensics_report_{attempt}.json" \
-   "{output_path}/precision_tuning/history/attempt_{attempt}/forensics_report.json"
-cp "{output_path}/precision_tuning/precision_audit_{attempt}.md" \
-   "{output_path}/precision_tuning/history/attempt_{attempt}/precision_audit.md"
+# 归档本轮取证报告和审计报告
+mkdir -p "{task_dir}/precision_tuning/history/attempt_{attempt}"
+cp "{task_dir}/precision_tuning/forensics_report_{attempt}.json" \
+   "{task_dir}/precision_tuning/history/attempt_{attempt}/forensics_report.json"
+cp "{task_dir}/precision_tuning/precision_audit_{attempt}.md" \
+   "{task_dir}/precision_tuning/history/attempt_{attempt}/precision_audit.md"
 
-# 更新 current_best 为最终通过的代码（match_rate = 100.0）
-mkdir -p "{output_path}/precision_tuning/history/current_best/code_snapshot"
-cp "{output_path}/{OpName}Custom/op_kernel/{op_name}_custom.cpp" \
-   "{output_path}/precision_tuning/history/current_best/code_snapshot/op_kernel.cpp"
-cp "{output_path}/{OpName}Custom/op_host/{op_name}_custom.cpp" \
-   "{output_path}/precision_tuning/history/current_best/code_snapshot/op_host.cpp"
-cp "{output_path}/{OpName}Custom/op_host/{op_name}_custom_tiling.h" \
-   "{output_path}/precision_tuning/history/current_best/code_snapshot/op_tiling.h"
-cp "{output_path}/{op_name}.cpp" \
-   "{output_path}/precision_tuning/history/current_best/code_snapshot/op_pybind.cpp"
-echo "100.0" > "{output_path}/precision_tuning/history/current_best/match_rate.txt"
+# 更新 current_best 为最终通过的代码
+mkdir -p "{task_dir}/precision_tuning/history/current_best/code_snapshot"
+cp -r "{task_dir}/kernel/" \
+   "{task_dir}/precision_tuning/history/current_best/code_snapshot/kernel/"
+cp "{task_dir}/model_new_ascendc.py" \
+   "{task_dir}/precision_tuning/history/current_best/code_snapshot/model_new_ascendc.py"
+echo "100.0" > "{task_dir}/precision_tuning/history/current_best/match_rate.txt"
 echo "精度通过，current_best 已更新为 100.0"
 ```
 
 **5.1 生成候选知识库条目 (Agent 执行):**
 
 基于 [ROOT_CAUSE] 和 [FIX_PLAN]，生成一条知识库候选条目，写入：
-`{output_path}/precision_tuning/candidate_kb_entry.json`
+`{task_dir}/precision_tuning/candidate_kb_entry.json`
 
 格式要求:
 ```json
@@ -750,37 +688,29 @@ echo "精度通过，current_best 已更新为 100.0"
 
 **5.2 写入知识库 (Python 执行):**
 ```bash
-python3 .opencode/skills/precision-tuning/scripts/precision_knowledge.py dump \
-    --kb-path .opencode/skills/precision-tuning/references/precision_knowledge_base.json \
-    --output-path "{output_path}" \
+python3 skills/ascendc/precision-tuning/scripts/precision_knowledge.py dump \
+    --kb-path skills/ascendc/precision-tuning/references/precision_knowledge_base.json \
+    --task-name {task_name} \
     --op-name {op_name}
 ```
 
 **5.3 保存成功代码快照:**
 ```bash
 # 将最终通过代码保存到 history/success/（永久保留，不覆盖）
-mkdir -p "{output_path}/precision_tuning/history/success/code_snapshot"
-cp "{output_path}/{OpName}Custom/op_kernel/{op_name}_custom.cpp" \
-   "{output_path}/precision_tuning/history/success/code_snapshot/op_kernel.cpp"
-cp "{output_path}/{OpName}Custom/op_host/{op_name}_custom.cpp" \
-   "{output_path}/precision_tuning/history/success/code_snapshot/op_host.cpp"
-cp "{output_path}/{OpName}Custom/op_host/{op_name}_custom_tiling.h" \
-   "{output_path}/precision_tuning/history/success/code_snapshot/op_tiling.h"
-cp "{output_path}/{op_name}.cpp" \
-   "{output_path}/precision_tuning/history/success/code_snapshot/op_pybind.cpp"
+mkdir -p "{task_dir}/precision_tuning/history/success/code_snapshot"
+cp -r "{task_dir}/kernel/" \
+   "{task_dir}/precision_tuning/history/success/code_snapshot/kernel/"
+cp "{task_dir}/model_new_ascendc.py" \
+   "{task_dir}/precision_tuning/history/success/code_snapshot/model_new_ascendc.py"
 echo "成功代码已保存到 history/success/code_snapshot/"
 ```
 
 > **从最佳代码恢复（如需重新调优）：**
 > ```bash
-> cp "{output_path}/precision_tuning/history/current_best/code_snapshot/op_kernel.cpp" \
->    "{output_path}/{OpName}Custom/op_kernel/{op_name}_custom.cpp"
-> cp "{output_path}/precision_tuning/history/current_best/code_snapshot/op_host.cpp" \
->    "{output_path}/{OpName}Custom/op_host/{op_name}_custom.cpp"
-> cp "{output_path}/precision_tuning/history/current_best/code_snapshot/op_tiling.h" \
->    "{output_path}/{OpName}Custom/op_host/{op_name}_custom_tiling.h"
-> cp "{output_path}/precision_tuning/history/current_best/code_snapshot/op_pybind.cpp" \
->    "{output_path}/{op_name}.cpp"
+> cp -r "{task_dir}/precision_tuning/history/current_best/code_snapshot/kernel/" \
+>    "{task_dir}/kernel/"
+> cp "{task_dir}/precision_tuning/history/current_best/code_snapshot/model_new_ascendc.py" \
+>    "{task_dir}/model_new_ascendc.py"
 > ```
 
 **5.4 输出成功报告:**
@@ -816,25 +746,17 @@ echo "成功代码已保存到 history/success/code_snapshot/"
 
 > **注意:** 失败时 `history/current_best/` 中保存了精度最好的代码。如需以此为基础重新调优，恢复方法：
 > ```bash
-> cp "{output_path}/precision_tuning/history/current_best/code_snapshot/op_kernel.cpp" \
->    "{output_path}/{OpName}Custom/op_kernel/{op_name}_custom.cpp"
-> cp "{output_path}/precision_tuning/history/current_best/code_snapshot/op_host.cpp" \
->    "{output_path}/{OpName}Custom/op_host/{op_name}_custom.cpp"
-> cp "{output_path}/precision_tuning/history/current_best/code_snapshot/op_tiling.h" \
->    "{output_path}/{OpName}Custom/op_host/{op_name}_custom_tiling.h"
-> cp "{output_path}/precision_tuning/history/current_best/code_snapshot/op_pybind.cpp" \
->    "{output_path}/{op_name}.cpp"
+> cp -r "{task_dir}/precision_tuning/history/current_best/code_snapshot/kernel/" \
+>    "{task_dir}/kernel/"
+> cp "{task_dir}/precision_tuning/history/current_best/code_snapshot/model_new_ascendc.py" \
+>    "{task_dir}/model_new_ascendc.py"
 > ```
 > 如需恢复到最初基线：
 > ```bash
-> cp "{output_path}/precision_tuning/history/baseline/code_snapshot/op_kernel.cpp" \
->    "{output_path}/{OpName}Custom/op_kernel/{op_name}_custom.cpp"
-> cp "{output_path}/precision_tuning/history/baseline/code_snapshot/op_host.cpp" \
->    "{output_path}/{OpName}Custom/op_host/{op_name}_custom.cpp"
-> cp "{output_path}/precision_tuning/history/baseline/code_snapshot/op_tiling.h" \
->    "{output_path}/{OpName}Custom/op_host/{op_name}_custom_tiling.h"
-> cp "{output_path}/precision_tuning/history/baseline/code_snapshot/op_pybind.cpp" \
->    "{output_path}/{op_name}.cpp"
+> cp -r "{task_dir}/precision_tuning/history/baseline/code_snapshot/kernel/" \
+>    "{task_dir}/kernel/"
+> cp "{task_dir}/precision_tuning/history/baseline/code_snapshot/model_new_ascendc.py" \
+>    "{task_dir}/model_new_ascendc.py"
 > ```
 
 ---
