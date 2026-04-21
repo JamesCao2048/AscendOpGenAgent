@@ -58,7 +58,14 @@ class OperatorTypeDetector:
     }
 
     def detect(self, op_name: str, task_dir: str) -> dict:
-        """基于算子名做关键词匹配推断算子类型。置信度低时标注 name_heuristic。"""
+        """基于算子名做关键词匹配推断算子类型。置信度低时标注 name_heuristic。
+
+        返回 dict 含 SKILL.md Sub-step 2.1 要求的所有 L8_operator 字段:
+          - op_type, source, confidence, pattern_priority (原有)
+          - attributes: dict — 从 model.py 静态 AST 解析 Model.__init__ 提取
+          - reduction_axis: {axis_index, axis_length} | None — 仅
+            reduction/normalization/pooling 类型尝试推断
+        """
         name = op_name.lower()
         type_map = [
             (["pool"], "pooling"),
@@ -68,21 +75,155 @@ class OperatorTypeDetector:
             (["concat", "cat"], "concat"),
             (["attn", "attention", "softmax"], "attention"),
             (["relu", "gelu", "silu", "activation", "elementwise"], "elementwise"),
+            (["reduce", "sum", "mean", "max", "min", "prod", "cumsum"], "reduction"),
+            (["loss", "mse", "cross_entropy", "bce"], "loss"),
+            (["conv"], "convolution"),
         ]
-        for keywords, op_type in type_map:
+        op_type = "unknown"
+        for keywords, t in type_map:
             if any(kw in name for kw in keywords):
-                return {
-                    "op_type": op_type,
-                    "source": "name_heuristic",
-                    "confidence": "low",
-                    "pattern_priority": self.OP_TYPE_PATTERN_PRIORITY.get(op_type, []),
-                }
+                op_type = t
+                break
+
+        attributes = self._extract_attributes(task_dir)
+        reduction_axis = None
+        if op_type in ("reduction", "normalization", "pooling"):
+            reduction_axis = self._infer_reduction_axis(task_dir, attributes)
+
         return {
-            "op_type": "unknown",
+            "op_type": op_type,
             "source": "name_heuristic",
             "confidence": "low",
-            "pattern_priority": [],
+            "pattern_priority": self.OP_TYPE_PATTERN_PRIORITY.get(op_type, []),
+            "attributes": attributes,
+            "reduction_axis": reduction_axis,
         }
+
+    # ------------------------------------------------------------------
+
+    _ATTR_KEYS_OF_INTEREST = frozenset({
+        "kernel_size", "stride", "padding", "dilation", "groups",
+        "dim", "axis", "keepdim", "reduce",
+        "normalized_shape", "eps", "elementwise_affine",
+        "alpha", "beta", "gamma",
+        "num_features", "num_classes",
+        "in_features", "out_features", "in_channels", "out_channels",
+        "scale", "scale_factor", "bias",
+        "ceil_mode", "count_include_pad", "divisor_override",
+        "return_indices", "output_size",
+    })
+
+    def _extract_attributes(self, task_dir: str) -> dict:
+        """Static AST parse of model.py → attributes dict.
+
+        Focuses on:
+          - Model.__init__ default args (most common)
+          - Top-level module constants (if Model refs them)
+          - SCENARIOS / CASES lists (avg_pool3_d style — first entry's keys)
+
+        Fails open: returns {} on any parse error. Never fatal.
+        """
+        import ast
+        model_py = Path(task_dir) / "model.py"
+        if not model_py.is_file():
+            return {}
+        try:
+            source = model_py.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+        except (OSError, SyntaxError):
+            return {}
+
+        attrs: dict = {}
+
+        # 1) Model.__init__ default args
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if node.name not in ("Model", "ModelNew"):
+                continue
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and item.name == "__init__":
+                    args = item.args
+                    defaults = args.defaults or []
+                    named_args = args.args[-len(defaults):] if defaults else []
+                    for arg, default in zip(named_args, defaults):
+                        if arg.arg in self._ATTR_KEYS_OF_INTEREST:
+                            try:
+                                attrs[arg.arg] = ast.literal_eval(default)
+                            except (ValueError, SyntaxError):
+                                pass
+            break
+
+        # 2) SCENARIOS / CASES 列表 — 取第一个 entry 的 interested keys
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name) and target.id in ("SCENARIOS", "CASES"):
+                    if isinstance(node.value, ast.List) and node.value.elts:
+                        first = node.value.elts[0]
+                        if isinstance(first, ast.Dict):
+                            for k_node, v_node in zip(first.keys, first.values):
+                                if isinstance(k_node, ast.Constant) \
+                                        and k_node.value in self._ATTR_KEYS_OF_INTEREST \
+                                        and k_node.value not in attrs:
+                                    try:
+                                        attrs[k_node.value] = ast.literal_eval(v_node)
+                                    except (ValueError, SyntaxError):
+                                        pass
+                    break
+
+        return attrs
+
+    def _infer_reduction_axis(self, task_dir: str, attrs: dict):
+        """Infer {axis_index, axis_length} from attributes + first input group shape.
+
+        Returns dict or None. axis_length may be None if input shape unavailable
+        statically (caller fills from runtime tensor in Sub-step 2.1).
+        """
+        axis_index = attrs.get("dim", attrs.get("axis"))
+        if axis_index is None:
+            return None
+        if not isinstance(axis_index, (int, list, tuple)):
+            return None
+
+        # Try to extract first input shape statically from SCENARIOS / CASES / explicit arrays.
+        import ast
+        model_py = Path(task_dir) / "model.py"
+        if not model_py.is_file():
+            return {"axis_index": axis_index, "axis_length": None}
+        try:
+            tree = ast.parse(model_py.read_text(encoding="utf-8"))
+        except SyntaxError:
+            return {"axis_index": axis_index, "axis_length": None}
+
+        first_shape = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name) and target.id in ("SCENARIOS", "CASES"):
+                    if isinstance(node.value, ast.List) and node.value.elts:
+                        first = node.value.elts[0]
+                        if isinstance(first, ast.Dict):
+                            for k_node, v_node in zip(first.keys, first.values):
+                                if isinstance(k_node, ast.Constant) and k_node.value == "shape":
+                                    try:
+                                        first_shape = tuple(ast.literal_eval(v_node))
+                                    except (ValueError, SyntaxError):
+                                        pass
+                                    break
+                    break
+
+        if first_shape is None:
+            return {"axis_index": axis_index, "axis_length": None}
+
+        try:
+            if isinstance(axis_index, int):
+                ai = axis_index if axis_index >= 0 else len(first_shape) + axis_index
+                if 0 <= ai < len(first_shape):
+                    return {"axis_index": axis_index, "axis_length": int(first_shape[ai])}
+        except Exception:
+            pass
+        return {"axis_index": axis_index, "axis_length": None}
 
 
 # ============================================================
