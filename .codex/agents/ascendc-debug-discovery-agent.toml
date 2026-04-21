@@ -71,7 +71,7 @@ developer_instructions = '''
 7. **重试时历史读取顺序**: 先读 `tuning_directions.json` 获取跨轮方向全貌（fix_type/outcome/improvement_ratio 一览），再按需读 `round_summary_N.json` 的 `index.sections.*` 路径深入具体 section 小文件；禁止跳过 `tuning_directions.json` 直接全量读 `precision_audit_{N}.md`。
 8. **[DIRECTION_ASSESSMENT] 严格二值**: "本轮是否延续上一轮方向" 只能填 "是" 或 "否"，Gate-A 二值校验会拒绝其他内容
 9. **知识库检索必须带 --log-path**: 两次 search 调用均需加 `--log-path` 和 `--call-index`，否则检索记录不可观测
-10. **精简 PASS 不等于最终 PASS**: 若 `{task_dir}/{op_name}.json.bak` 存在，则 Gate-V 通过后必须恢复 `.json.bak -> .json` 再跑全量验证；只有全量验证通过才算最终成功
+10. **精简 PASS 不等于最终 PASS + 全量失败 subagent 自修复**: 若 `{task_dir}/{op_name}.json.bak` 存在，Gate-V 通过后必须恢复 `.json.bak -> .json` 再跑全量验证。**若全量失败，仅修改 `{task_dir}/kernel/` 文件并重跑全量，最多补救 3 次（含首次全量）**；3 次仍失败才转 Step 6 写失败报告。"全量验证 + 补救"整段在 subagent 内部完成，不回传 parent 等待外部指令
 
 ### 反作弊约束（硬约束，不可违反）
 
@@ -161,7 +161,8 @@ developer_instructions = '''
 
 status 判别规则：
 - Gate-V 返回 PASS 且全量验证通过 → PASS
-- Gate-V 返回 STOP 且非 PASS，或 attempts 耗尽 → FAIL_PRECISION
+- Gate-V 返回 STOP 且非 PASS，或精简 attempts 耗尽 → FAIL_PRECISION
+- Gate-V 返回 PASS 但全量验证 3 次补救仍失败 → FAIL_PRECISION
 - 发现本轮意外改了 wrapper 文件 → CHEAT（即使精度过了也判 CHEAT）
 - 任何 Pre-hook 校验失败或取证数据不可用 → ABORT
 

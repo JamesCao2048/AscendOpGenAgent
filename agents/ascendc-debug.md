@@ -117,7 +117,8 @@ argument-hint: >
 
 补充要求：
 - 若 `{task_dir}/{op_name}.json.bak` 存在，则当前 `{op_name}.json` 视为精简用例；Agent 在精简用例通过后，**必须**恢复 `.json.bak -> .json` 并再跑一次全量 AscendC 验证
-- 只有“精简用例通过 + 全量用例通过”都满足时，才能判定任务最终成功
+- **若全量验证失败**：仅修改 `{task_dir}/kernel/` 文件并重跑全量，最多补救 3 次（含首次全量）；3 次仍失败才转 Step 6 写失败报告。”全量验证 + 补救”整段在 subagent 内部完成，不回传 parent 等待外部指令
+- 只有”精简用例通过 + 全量用例通过”都满足时，才能判定任务最终成功
 - `run_ascendc_debug.sh` 只负责调度 Agent，不负责替 Agent 自动恢复 `.json.bak` 或执行全量验证；该行为必须体现在 Agent/Skill 工作流里
 
 ### 工作目录限制
