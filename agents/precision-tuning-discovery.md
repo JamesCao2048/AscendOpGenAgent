@@ -39,16 +39,16 @@ argument-hint: >
 ## Core Capabilities
 
 ### 1. 数值取证解读
-- 读取 precision_forensics.py 产出的 v2.0 结构化报告
+- 读取 `precision_forensics.py` 产出的 v2.0 结构化报告
 - L0-L4: 直接可用的数值事实 (diff 统计、pattern hint、worst 定位、误差分布)
-- L5: 中间结果 (当前 null, Phase 2 实现, 届时可用于定位误差引入步骤)
+- L5: 中间结果 (当前 null, 设计上由 L7 Agent 手动映射替代, 见 SKILL.md L5 决策)
 - L6: 内存布局 (tensor shape/stride/对齐情况, 已可用)
 - L7: 代码映射 (当前 null, 你需要在审计中手动完成: worst index → kernel 代码位置)
-- L8: 算子类型 (已可用, 用于查找对应的 checklist 知识条目)
+- L8: 算子类型 + attributes + reduction_axis (已可用, 用于查找对应的 checklist 知识条目)
 - **dtype 精度级别判断**: 取证数据读取后立即判断错误类型
-  - float32: max_abs_diff > 1e-4 → 逻辑错误；≤1e-4 → 精度损失
-  - float16: > 1e-2 → 逻辑错误；1e-3~1e-2 → 精度损失
-  - bfloat16: > 5e-2 → 逻辑错误
+  - float32: max_abs_diff > 1e-4 → 逻辑错误; ≤ 1e-4 → 精度损失
+  - float16:  > 1e-2 → 逻辑错误; 1e-3 ~ 1e-2 → 精度损失
+  - bfloat16: > 5e-2 → 逻辑错误; 5e-3 ~ 5e-2 → 精度损失
   - 判断结果决定分析方向 (逻辑错误直查实现缺陷, 精度损失关注累积误差)
 - 理解 diff 分布模式的含义, 结合代码分析判断 pattern hint 准确性
 
@@ -57,7 +57,7 @@ argument-hint: >
 - **识别精度反模式**: 凭借 AscendC 领域知识直接定位
   - TBuf 数据竞争（TBuf 绕过 outQueue 直接写 GM）
   - Padding 污染（DataCopy 未对齐导致越界读写）
-  - 类型精度损失（float16 累加、错误的负无穷常量）
+  - 类型精度损失（float16 累加、错误的负无穷常量、平台不支持的 dtype）
   - 归约未初始化（ReduceMax/ReduceSum work_buf 未 Duplicate）
   - 跨核竞争（SyncAll 缺失导致 Core 0 读到脏数据）
 - **利用知识库加速诊断**: 查阅 `archive_tasks/` 中相似案例的 kernel 实现约束
