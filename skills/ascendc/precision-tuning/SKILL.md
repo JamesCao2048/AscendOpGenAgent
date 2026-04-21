@@ -147,7 +147,11 @@ cat "{task_dir}/precision_tuning/round_summary_{N}.json"
 
 **读取**: `{task_dir}/precision_tuning/forensics_report_{attempt}.json`
 
-**产出**: `[FORENSICS_SUMMARY]` section
+**可选前置读取（仅 attempt == 0 且文件存在）**: `{task_dir}/trace.md`
+
+> trace.md 由 `ascend-kernel-developer` 在生成阶段产出，记录 Phase 4 AscendC 转译的迭代历史、走偏点、已知平台/API 限制、kernel 结构意图。读取它可以**避免重蹈生成阶段已走偏的方向**，并补全 kernel 设计背景。文件不存在时跳过，Gate-A 不强制。
+
+**产出**: `[FORENSICS_SUMMARY]` section + `[PRIOR_TRACE_CONTEXT]`（可选，仅首轮 + trace.md 存在时）
 
 逐字段摘录取证报告中的关键数值, 不允许跳过任何字段:
 
@@ -191,6 +195,31 @@ cat "{task_dir}/precision_tuning/round_summary_{N}.json"
     - 取证给出的 hint 是否合理? <结合数值证据判断, 不要在此步做代码分析>
     - 是否有数值异常未被 hint 覆盖? <如 sign_analysis 显示偏向但 hint 未提及>
 ```
+
+**可选段（仅当 attempt == 0 且 `{task_dir}/trace.md` 存在时写入）**:
+
+```
+[PRIOR_TRACE_CONTEXT]
+  来源: {task_dir}/trace.md (ascend-kernel-developer 生成阶段产出)
+  最终结果: <如 "SKIP (tilelang) | FAIL (ascendc)" 或 "PASS">
+  Phase 4 AscendC 迭代次数: <evaluate_ascendc.sh 执行次数>
+
+  已尝试方向（本轮修复时避免重复）:
+    - 第 N 轮: <一句话总结做了什么、结果如何>
+    - ...
+
+  走偏点记录（trace.md "走偏点" 章节原文提炼）:
+    - <如 "把 device kernel 写成模板入口导致 host stub 找不到实际符号">
+    - <如 "Muls 在 bfloat16 下不支持, 当前平台 API 限制">
+
+  剩余未解决的平台/API 限制:
+    - <trace.md 揭示的硬性约束, 如 "当前平台 Muls 不支持 __bf16">
+
+  kernel 结构要点（若 trace.md 提及）:
+    - <如 "分 fp32/fp16/bf16 三个独立入口">
+```
+
+> 如 trace.md 不存在, 省略此 section, 不影响 Gate-A。写入时只摘录关键点, **不要**粘贴 trace.md 全文或长代码块。
 
 **知识库检索 (第一次 — 基于取证 hint + 算子类型):**
 
@@ -447,6 +476,8 @@ python3 skills/ascendc/precision-tuning/scripts/precision_knowledge.py search \
 **产出**: `[KNOWLEDGE_MATCH]` + `[ROOT_CAUSE]` + `[FIX_PLAN]` + `[TARGET_FILES]` + `[DIRECTION_ASSESSMENT]` sections
 
 **要求**: 根因判断必须基于 2.1~2.3 的具体发现, 不允许"凭直觉"给出根因。证据链中必须引用具体的 K-Step 编号和取证数据字段。
+
+> ⚠️ **若 Sub-step 2.1 产出了 `[PRIOR_TRACE_CONTEXT]`**，`[FIX_PLAN]` 的修复方向**不得**与其"已尝试方向"里的失败路径重复，也**不得**违反"剩余未解决的平台/API 限制"（如 trace.md 明确记录"当前平台 Muls 不支持 __bf16"，则不得在修复中使用 `Muls` 处理 bf16 dtype）。在 `[ROOT_CAUSE].证据链` 里显式引用 trace 中对应的走偏点或平台限制条目。
 
 > ⚠️ **写 [FIX_PLAN] 前必须查阅 `TileLang-AscendC-API-Mapping.md`，核实所有将要使用的 AscendC API 名称**：
 > - 逐元素向量最大值：`Max`（不是 `Vmax`，该 API 不存在）
