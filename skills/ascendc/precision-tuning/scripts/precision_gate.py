@@ -1008,10 +1008,10 @@ class GateChecker:
             return False
         import_name = import_m.group(1)
         pybind_text = open(pybind).read()
-        module_m = re.search(r"PYBIND11_MODULE\s*\(\s*(\w+)\s*,", pybind_text)
+        module_m = re.search(r"PYBIND11_MODULE\s*\(\s*([A-Za-z_]\w*)\s*,", pybind_text)
         if not module_m:
             return False
-        module_name = "_" + module_m.group(1)
+        module_name = module_m.group(1)
         return import_name == module_name
 
     def _result(self, gate_name: str, checks: dict) -> dict:

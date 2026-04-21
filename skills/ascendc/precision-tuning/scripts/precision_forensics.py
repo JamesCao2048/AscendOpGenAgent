@@ -254,6 +254,56 @@ class OperatorExecutor:
         self.task_dir = str(Path(task_dir).resolve())
         self.attempt = attempt
 
+    def _extract_pybind_module_name(self) -> str | None:
+        pybind_path = Path(self.task_dir) / "kernel" / "pybind11.cpp"
+        if not pybind_path.is_file():
+            return None
+        try:
+            content = pybind_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        match = re.search(r"PYBIND11_MODULE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,", content)
+        return match.group(1) if match else None
+
+    def _ensure_candidate_extension_built(self) -> None:
+        """Build the candidate extension on first forensics run if the .so is missing.
+
+        Phase 1 only copies the task directory; kernel/build may not exist yet.
+        The candidate wrapper imports the pybind module eagerly, so forensics must
+        ensure the extension has been built before spawning the child loader.
+        """
+        kernel_build = Path(self.task_dir) / "kernel" / "build"
+        module_name = self._extract_pybind_module_name()
+        if not module_name:
+            return
+
+        expected = list(kernel_build.glob(f"{module_name}*.so")) if kernel_build.is_dir() else []
+        if expected:
+            return
+
+        build_script = REPO_ROOT / "utils" / "build_ascendc.py"
+        if not build_script.is_file():
+            raise RuntimeError(f"missing build script: {build_script}")
+
+        proc = subprocess.run(
+            [sys.executable, str(build_script), self.task_dir, "-v", "Ascend910B3", "--clean"],
+            capture_output=True,
+            text=True,
+            env={**os.environ},
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "auto-build candidate extension failed before forensics:\n"
+                f"stdout tail: {proc.stdout[-1500:]}\n"
+                f"stderr tail: {proc.stderr[-1500:]}"
+            )
+
+        expected = list(kernel_build.glob(f"{module_name}*.so")) if kernel_build.is_dir() else []
+        if not expected:
+            raise RuntimeError(
+                f"auto-build finished but candidate extension {module_name}*.so was not found in {kernel_build}"
+            )
+
     def load_and_execute(self) -> dict:
         """Returns:
           {
@@ -272,6 +322,8 @@ class OperatorExecutor:
         if dump_root.exists():
             shutil.rmtree(dump_root)
         dump_root.mkdir(parents=True, exist_ok=True)
+
+        self._ensure_candidate_extension_built()
 
         env = {**os.environ}
         # 保留 caller 已设定的 ASCEND_RT_VISIBLE_DEVICES (不覆盖), 与 bench 一致

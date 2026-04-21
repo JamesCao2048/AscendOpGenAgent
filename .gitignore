@@ -12,3 +12,5 @@ output*
 build/
 extra-info/
 *.tar
+CLAUDE.md
+.validation_logs/

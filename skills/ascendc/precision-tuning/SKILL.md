@@ -89,6 +89,10 @@ cp "{task_dir}/model_new_ascendc.py" \
 
 #### 1.1 精度取证 (Python 脚本, 不可跳过)
 
+> 若 `{task_dir}/kernel/build/` 下还没有 candidate wrapper 所需的 pybind `.so`，取证脚本会先自动调用
+> `utils/build_ascendc.py {task_dir} -v Ascend910B3 --clean` 预构建一次，再进入 forensics。
+> 这样可以覆盖“Phase 1 仅复制目录、尚未 build”的首轮场景，避免 `ModuleNotFoundError: No module named '_xxx_ext'`。
+
 ```bash
 python3 skills/ascendc/precision-tuning/scripts/precision_forensics.py \
     {task_name} --attempt {attempt}
