@@ -44,7 +44,7 @@ Phase 0: 参数确认           (解析 npu, op_file, output_dir)
 Phase 1: 环境准备           (复制算子文件到输出目录)
 Phase 2: INPUT_CASES 精简   (case-simplifier)
 Phase 3: TileLang 设计表达     (tilelang-designer + 退化检测)
-Phase 4: AscendC 转译与验证  (ascendc-translator + 退化检测)
+Phase 4: AscendC 转译与验证  (ascendc-translator + 退化检测 + 线性委派 cann-debug-agent)
 Phase 5: 性能分析           (performance-analyzer)
 Phase 6: 全量用例验证
 Phase 7: Trace 记录         (trace-recorder)
@@ -301,114 +301,150 @@ while tl_iteration < max_tl_iterations:
 
 ---
 
-## Phase 4: AscendC 转译与验证（迭代循环）
-
-Agent 自身维护迭代状态，编排 "转译/生成 → 退化检测 → 功能验证 → Conductor 分析" 的循环。
+## Phase 4: AscendC 转译与验证（线性 + 委派）
 
 ### 前置条件
 
 - `{output_dir}/design/tile_level/` TileLang 代码已存在
 - `{output_dir}/model_new_tilelang.py` 已存在
 
-### 状态变量
+### 4.0 AscendC 转译（一次性）
+
+调用 `ascendc-translator` skill，读取 `@references/TileLang-AscendC-API-Mapping.md`，
+将 `{output_dir}/design/tile_level/` 的 TileLang kernel 转译为 AscendC kernel，
+输出到 `{output_dir}/kernel/`。
+
+### 4.1 生成 wrapper（一次性）
+
+调用 `ascendc-translator` skill，基于 `{output_dir}/kernel/` 生成
+`{output_dir}/model_new_ascendc.py`。
+
+产物：
+- `{output_dir}/model_new_ascendc.py`
+
+### 4.2 AST 退化预检查（一次性）
 
 ```
-ac_iteration = 0
-max_ac_iterations = 3
-ac_history_attempts = []
-ac_verifier_error = ""
-ac_conductor_suggestion = ""
+python skills/ascendc/ascendc-translator/scripts/validate_ascendc_impl.py \
+    {output_dir}/model_new_ascendc.py
 ```
 
-### 前置：TileLang → AscendC 转译（仅首次）
+- exit == 0 → 进入 4.3
+- exit != 0 → 标记 A-AscendCFallback-Type{N}，**跳到 Phase 7（不 spawn subagent）**
 
-首轮（ac_iteration == 0）执行一次性转译步骤，后续迭代不再重复：
+原因：精度调优 subagent 被禁止修改 `model_new_ascendc.py` / `model.py`，
+AST 退化本质是 wrapper 退化，subagent 无法在合规前提下修复。
 
-1. **AscendC 转译**：调用 `ascendc-translator` skill，读取 `@references/TileLang-AscendC-API-Mapping.md`，将 `{output_dir}/design/tile_level/` 中的 TileLang kernel 转译为 AscendC kernel，输出到 `{output_dir}/kernel/`
-
-### 迭代循环
-
-```
-while ac_iteration < max_ac_iterations:
-
-    ── 4.1 代码生成 ──────────────────────────────────
-    调用 ascendc-translator skill 生成 model_new_ascendc.py
-
-    首次 (ac_iteration == 0):
-      传入: output_dir
-      基于 kernel/ 中的 AscendC kernel 生成 wrapper
-
-    重试 (ac_iteration > 0):
-      传入: output_dir + ac_verifier_error + ac_conductor_suggestion
-      根据修复建议修改 kernel/ 和/或 model_new_ascendc.py
-
-    产物 → {output_dir}/model_new_ascendc.py
-           {output_dir}/kernel/
-
-    ── 4.2 AST 退化预检查 ────────────────────────────
-    执行 validate_ascendc_impl.py 检测 PyTorch 退化
-
-    python skills/ascendc/ascendc-translator/scripts/validate_ascendc_impl.py \
-        {output_dir}/model_new_ascendc.py
-
-    退化 (exit code != 0):
-      ac_verifier_error = "A-AscendCFallback-Type{N}: {suggestion}"
-      → 跳到 4.4 Conductor
-
-    通过 (exit code == 0):
-      → 继续 4.3
-
-    ── 4.3 功能验证 ──────────────────────────────────
-    调用 ascendc-translator skill 自带的 evaluate_ascendc.sh
-
-    bash skills/ascendc/ascendc-translator/references/evaluate_ascendc.sh \
-        {output_dir}
-
-    验证通过:
-      → break，Phase 4 成功，进入 Phase 5
-
-    验证失败:
-      ac_verifier_error = evaluate_ascendc.sh 的错误输出
-      → 跳到 4.4 Conductor
-
-    ── 4.4 Conductor 分析与决策 ──────────────────────
-    (Agent 自身推理，非 Skill 调用)
-
-    错误分类:
-      A 类 — 代码逻辑/算法错误 (可修复)
-        含 A-AscendCFallback-Type{1-4} 子类型
-      B 类 — 环境/基础设施错误 (不可修复)
-      C 类 — 重复失败: 同一 A 类子类型连续 ≥ 3 次
-
-    决策:
-      B 类 → 终止，任务失败
-      C 类 → 终止，任务失败
-      A 类 且 ac_iteration < max_ac_iterations:
-        → 生成 ac_conductor_suggestion
-        → ac_history_attempts.append(本轮记录)
-        → ac_iteration++
-        → continue
-
-达到 max_ac_iterations → Phase 4 失败，跳到 Phase 7 记录 trace
-```
-
-### Conductor 修复建议格式
+### 4.3 功能验证（一次性）
 
 ```
-错误分析：
-- 类型：{A/B/C}（{子类型描述}）
-- 位置：{错误代码位置}
-- 具体错误：{错误详情}
-
-修复建议：
-1. {具体修改方向}
-2. {具体修改方向}
-
-历史提醒：
-- 第 N 轮曾因 {问题} 失败，避免重复
+bash skills/ascendc/ascendc-translator/references/evaluate_ascendc.sh \
+    {output_dir}
 ```
 
-### AscendC 退化子类型
+分类逻辑（保守优先，**先排除 build/import，再判 numerical**）：
+
+| 信号（在 evaluate 输出中出现） | 分类 | 路由 |
+|---|---|---|
+| `ModuleNotFoundError`、`ImportError`、`undefined symbol`、`cannot open shared object file`、`fatal error:`、`c++: error`、`ld:`、`collect2:`、`undefined reference`、`SyntaxError`、`NameError`、`AttributeError`、`No such file or directory` | Build/Import | Phase 7（不 spawn） |
+| `Tensors are not close`、`max_abs_diff`、`mismatch_ratio`、`Numerical mismatch`、per-case diff 统计 | Numerical | 候选进入 4.4 |
+| 两类都命中 | Mixed | Phase 7（不 spawn） |
+| 两类都未命中 | Unknown | Phase 7（不 spawn），trace 标 A-Unknown-Phase4Fail |
+
+规则：
+- 当且仅当“无 Build/Import 信号且存在 Numerical 信号”时，允许进入 4.4。
+- 即便只有部分 case 数值失败、另一些 case 通过，只要无 Build/Import 信号，仍视为可 spawn。
+- “部分 case 数值失败，但另一些 case 编译/导入失败”视为 Mixed，不可 spawn。
+
+路由结果：
+- all pass → 进入 Phase 5
+- pure numerical fail → 进入 4.4
+- 其它 → Phase 7
+
+### 4.4 委派 cann-debug-agent（spawn）
+
+**Step A: 计算 parent-side wrapper baseline**
+
+```
+sha256_ascendc = sha256({output_dir}/model_new_ascendc.py)
+sha256_tilelang = sha256({output_dir}/model_new_tilelang.py) if exists else null
+```
+
+**Step B: 写 parent_handoff.json**
+
+路径: `{output_dir}/precision_tuning/parent_handoff.json`
+
+（若 `{output_dir}/precision_tuning/` 不存在，先 mkdir）
+
+schema:
+```json
+{
+  "source": "ascend-kernel-developer@phase4",
+  "spawned_at": "<ISO8601>",
+  "task_name": "<output_dir basename>",
+  "task_dir": "<output_dir absolute path>",
+  "op_name": "<算子名，同 task_name>",
+  "npu": <NPU_ID>,
+  "failure_class": "Numerical",
+  "failure_policy": "pure_numerical_only",
+  "evaluate_excerpt": "<evaluate_ascendc.sh 输出中失败 case 名 + 关键 diff 统计，80-120 行>",
+  "phase3_design_summary": {
+    "design_dir": "{output_dir}/design/tile_level",
+    "key_choices": ["<block/tile 切分>", "<核心 primitives>"]
+  },
+  "phase4_translation_summary": {
+    "kernel_files": ["<kernel/*.cpp 和 *.h 列表>"],
+    "api_usage": ["<实际在 kernel 中用到的主力 AscendC API>"],
+    "known_platform_limits": ["<若 Phase 3/4 已发现的 API/dtype 限制>"]
+  },
+  "wrapper_baseline": {
+    "model_new_ascendc_sha256": "<sha256_ascendc>",
+    "model_new_tilelang_sha256": "<sha256_tilelang 或 null>"
+  }
+}
+```
+
+**Step C: Spawn cann-debug-agent**
+
+spawn 说明（自然语言，Codex runtime 按名字识别）：
+
+"spawn cann-debug-agent subagent 执行精度调优。
+ 输入契约：`{output_dir}/precision_tuning/parent_handoff.json`。
+ 目标：让 evaluate_ascendc.sh 全部 case 通过。
+ 允许修改范围：仅 `{output_dir}/kernel/`。
+ 返回值：写入 `{output_dir}/precision_tuning/subagent_result.json`。"
+
+**Step D: 等待 subagent 返回，读 subagent_result.json**
+
+- PASS → 执行 Step E parent-side anti-cheat 复核
+- FAIL_PRECISION → 跳到 Phase 7
+- CHEAT → 跳到 Phase 7，trace 标异常
+- ABORT → 跳到 Phase 7，trace 标 subagent_abort
+
+**Step E: parent-side anti-cheat 复核（仅 PASS 分支）**
+
+1. 重新 sha256 `{output_dir}/model_new_ascendc.py`（以及 model_new_tilelang.py 若存在）
+2. 与 wrapper_baseline 对比；任一不一致 → 判 CHEAT，跳 Phase 7
+3. 重跑 `validate_ascendc_impl.py {output_dir}/model_new_ascendc.py`
+4. exit != 0 → 判 CHEAT，跳 Phase 7
+5. 全部通过 → 进入 Phase 5
+
+**产出**：
+- `{output_dir}/kernel/` — AscendC kernel 文件
+- `{output_dir}/model_new_ascendc.py` — AscendC 优化实现（subagent 调完未改 wrapper）
+- `{output_dir}/precision_tuning/` — 精度调优完整历史
+
+### 约束
+
+| 约束 | 说明 |
+|------|------|
+| Phase 4 不再有 parent 自循环 | 线性执行；数值失败委派 cann-debug-agent subagent |
+| Phase 4.4 的 subagent 最多 2 轮 | 等同 `precision_gate.py` 的 MAX_ATTEMPTS |
+| 禁止 PyTorch 退化 | 同原文 |
+| 退化检测前置 | 同原文，但只做一次 |
+| 文件操作范围 | subagent 仅 `{output_dir}/kernel/`；parent 收尾 anti-cheat 复核 wrapper |
+
+### AscendC 退化子类型（trace / 诊断用）
 
 | 子类型 | 含义 | 修复建议 |
 |--------|------|---------|
@@ -417,7 +453,7 @@ while ac_iteration < max_ac_iterations:
 | Type3 | forward() 调用了 kernel 但部分计算仍用 PyTorch | 将禁止的 PyTorch 计算（torch.*/F.*/tensor 计算方法）移入 AscendC kernel |
 | Type4 | forward() 中存在逐元素 Python for 循环 | 消除 for 循环，使用 AscendC kernel 的向量化/块级操作 |
 
-### A 类错误详细分类（AscendC）
+### A 类错误详细分类（AscendC，trace / 诊断用）
 
 | 特征 | 示例 |
 |------|------|
@@ -437,10 +473,6 @@ while ac_iteration < max_ac_iterations:
 | 依赖缺失 | ModuleNotFoundError（非代码导致） |
 | 编译失败 | AscendC 编译器内部错误（非代码语法问题） |
 | 超时 | Timeout、进程被杀死 |
-
-**产出**：
-- `{output_dir}/kernel/` — AscendC kernel 文件
-- `{output_dir}/model_new_ascendc.py` — AscendC 优化实现（已通过退化检测 + 功能验证）
 
 ---
 
@@ -501,6 +533,7 @@ while ac_iteration < max_ac_iterations:
 |  ├── kernel/                      # AscendC kernel 实现
 |  ├── model_new_tilelang.py        # TileLang 优化实现
 |  ├── model_new_ascendc.py         # AscendC 优化实现
+|  ├── precision_tuning/            # Phase 4.4 spawn 产物：parent_handoff.json / subagent_result.json / forensics_*.json / round_summary_*.json / ...
 |  └── trace.md                     # 执行 trace 记录
 ├── utils/                # 验证、性能分析等工具，禁止修改
 └── archive_tasks/        # 其他历史任务，可作为参考实现
@@ -523,9 +556,10 @@ while ac_iteration < max_ac_iterations:
 | Phase 2 | 无需精简 | 跳过，继续后续阶段 |
 | Phase 3 | TileLang 退化检测失败 | 标记 A-TileLangFallback-Type{N}，不执行功能验证，直接修复迭代 |
 | Phase 3 | TileLang 验证失败 | 记录为辅助检查失败；若属 TileLang 自身问题，可跳过并继续 Phase 4 |
-| Phase 4 | AscendC 退化检测失败 | 标记 A-AscendCFallback-Type{N}，不执行功能验证，消耗迭代次数修复 |
-| Phase 4 | AscendC 验证失败 | 最多 3 次迭代，失败后报告状态 |
-| Phase 4 | B 类环境错误 | 立即终止，任务失败 |
+| Phase 4 | AST 退化检测失败 | 标记 A-AscendCFallback-Type{N}，**直接跳 Phase 7（不 spawn subagent）** |
+| Phase 4 | Build/Import 失败 | 直接跳 Phase 7（不 spawn subagent） |
+| Phase 4 | 纯数值失败 | 写 parent_handoff.json 并 spawn cann-debug-agent；PASS 前 parent 做 anti-cheat 复核 |
+| Phase 4 | Mixed / Unknown 失败 | 直接跳 Phase 7（不 spawn subagent） |
 | Phase 6 | 全量验证失败 | 记录结果，不修复，继续 Phase 7 |
 | Phase 7 | Trace 记录失败 | 不影响主流程，仅记录失败状态 |
 
@@ -535,9 +569,9 @@ while ac_iteration < max_ac_iterations:
 |------|------|------|
 | A 类 — 代码逻辑/算法错误 | 可修复，含退化子类型 | 生成修复建议，继续迭代 |
 | A-TileLangFallback-Type{1-4} | TileLang 实现退化（见 Phase 3 子类型表） | 按退化脚本 suggestion 修复 |
-| A-AscendCFallback-Type{1-4} | AscendC 实现退化（见 Phase 4 子类型表） | 按退化脚本 suggestion 修复 |
+| A-AscendCFallback-Type{1-4} | AscendC 实现退化（见 Phase 4 子类型表） | AST 退化 → Phase 7；不走 parent 自修复；不 spawn subagent |
 | B 类 — 环境/基础设施错误 | 不可修复 | 立即终止 |
-| C 类 — 重复失败 | 同一 A 类子类型连续 ≥ 3 次 | 立即终止 |
+| C 类 — 重复失败 | 同一 A 类子类型连续 ≥ 3 次（仅 Phase 3 适用） | 立即终止 |
 
 ---
 
@@ -545,11 +579,12 @@ while ac_iteration < max_ac_iterations:
 
 | 约束 | 说明 |
 |------|------|
-| Phase 4 最大迭代 | 3 次，禁止超出 |
+| Phase 3 最大迭代 | 5 次，禁止超出 |
+| Phase 4 subagent 最多 2 轮 | 由 `precision_gate.py` 的 `MAX_ATTEMPTS = 2` 约束；Phase 4 parent 端本身已无自循环 |
 | 禁止 PyTorch 退化 | model_new_*.py 中禁止 torch.* 计算操作 |
 | 退化检测前置 | 每次生成/修改 model_new_tilelang.py 或 model_new_ascendc.py 后，必须先通过退化检测脚本，再执行功能验证 |
-| A 类连续上限 | 同一退化子类型连续 ≥ 3 次 → 自动终止 |
-| 文件操作范围 | 限制在 `{output_dir}/` 目录内 |
+| A 类连续上限（Phase 3） | 同一退化子类型连续 ≥ 3 次 → 自动终止 |
+| 文件操作范围 | 限制在 `{output_dir}/` 目录内；Phase 4.4 subagent 进一步限制为 `{output_dir}/kernel/` |
 | 验证方式 | 各 Phase 使用对应 Skill 自带的 `@references/` 工具 |
 | NPU 设备 | 通过 `ASCEND_RT_VISIBLE_DEVICES` 环境变量设置 |
 | 语言 | 思考、分析、日志使用中文；代码、路径使用英文 |

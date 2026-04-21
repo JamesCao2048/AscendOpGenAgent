@@ -124,6 +124,62 @@ argument-hint: >
 > **注意**: 发现式审计不强制预读 lowering 示例，但 Gate-A 仍要求 `[REFERENCE_IMPL_SPEC]` section。
 > 若分析过程中对某 API 规范存疑，主动查阅 `skills/ascendc/ascendc-translator/references/` 相关文件。
 
+## Parent-Spawn Handoff Pre-Hook
+
+### 适用场景
+本 agent 既可由 utils/run_precision_tuning.sh 以 standalone 方式启动，
+也可由 ascend-kernel-developer 在 Phase 4.4 spawn。两种场景共用同一组 Step，
+仅在"首轮 Step 2.1 取证数据解读"之前多一个 pre-hook。
+
+### Pre-hook 逻辑（attempt == 0 且本 agent 被 spawn 时）
+
+1. 检查 {task_dir}/precision_tuning/parent_handoff.json 是否存在。
+
+2. 存在时（parent-spawn 路径）：
+   - 读入 parent_handoff.json
+   - 校验 failure_class == "Numerical" 且 failure_policy == "pure_numerical_only"
+   - 若校验失败，写 subagent_result.json 且 status = ABORT，立即退出
+   - 将 handoff 中以下字段摘录进 [PRIOR_TRACE_CONTEXT] section：
+     * phase3_design_summary.key_choices
+     * phase4_translation_summary.api_usage, known_platform_limits
+     * evaluate_excerpt 的 top-3 失败 case + 最大 diff
+   - 记住 wrapper_baseline，在结束时写入 subagent_result.json 的 evidence
+
+3. 不存在时（standalone 路径）：
+   - 按原逻辑，attempt == 0 时可选读取 {task_dir}/trace.md
+
+4. 无论走哪条路径，之后继续执行原有 Step 1 (precision_forensics.py) 与 Gate-F。
+   Pre-hook 不改变 Gate-A 的必填 section 列表；[PRIOR_TRACE_CONTEXT] 仍是可选段，
+   但 parent-spawn 场景下必须写。
+
+### 结束时产物：subagent_result.json
+
+在 Gate 流程全部完成（无论 PASS 还是到达 MAX_ATTEMPTS）后，
+写 {task_dir}/precision_tuning/subagent_result.json：
+
+```json
+{
+  "status": "PASS | FAIL_PRECISION | CHEAT | ABORT",
+  "attempts_used": "<实际跑到的 attempt 编号 + 1，上限 2>",
+  "final_max_abs_diff": "<最终一轮 forensics 的 outputs[0].basic_stats.max_abs_diff>",
+  "modified_files": ["kernel/xxx.cpp"],
+  "reason": "<一句话>",
+  "evidence": {
+    "round_summary": "precision_tuning/round_summary_<N>.json",
+    "validation": "precision_tuning/validation_result_attempt_<N>.json",
+    "tuning_directions": "precision_tuning/tuning_directions.json"
+  }
+}
+```
+
+status 判别规则：
+- Gate-V 返回 PASS 且全量验证通过 → PASS
+- Gate-V 返回 STOP 且非 PASS，或 attempts 耗尽 → FAIL_PRECISION
+- 发现本轮意外改了 wrapper 文件 → CHEAT（即使精度过了也判 CHEAT）
+- 任何 Pre-hook 校验失败或取证数据不可用 → ABORT
+
+subagent_result.json 由本 agent 自己写，不由 precision_gate.py 写。
+
 ## Communication Style
 
 - **所有思考、分析、推理、说明必须使用中文**
