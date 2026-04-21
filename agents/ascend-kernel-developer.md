@@ -434,17 +434,7 @@ spawn 说明（自然语言，Codex runtime 按名字识别）：
 - `{output_dir}/model_new_ascendc.py` — AscendC 优化实现（subagent 调完未改 wrapper）
 - `{output_dir}/precision_tuning/` — 精度调优完整历史
 
-### 约束
-
-| 约束 | 说明 |
-|------|------|
-| Phase 4 不再有 parent 自循环 | 线性执行；数值失败委派 cann-debug-agent subagent |
-| Phase 4.4 的 subagent 最多 2 轮 | 等同 `precision_gate.py` 的 MAX_ATTEMPTS |
-| 禁止 PyTorch 退化 | 同原文 |
-| 退化检测前置 | 同原文，但只做一次 |
-| 文件操作范围 | subagent 仅 `{output_dir}/kernel/`；parent 收尾 anti-cheat 复核 wrapper |
-
-### AscendC 退化子类型（trace / 诊断用）
+### AscendC 退化子类型
 
 | 子类型 | 含义 | 修复建议 |
 |--------|------|---------|
@@ -453,7 +443,7 @@ spawn 说明（自然语言，Codex runtime 按名字识别）：
 | Type3 | forward() 调用了 kernel 但部分计算仍用 PyTorch | 将禁止的 PyTorch 计算（torch.*/F.*/tensor 计算方法）移入 AscendC kernel |
 | Type4 | forward() 中存在逐元素 Python for 循环 | 消除 for 循环，使用 AscendC kernel 的向量化/块级操作 |
 
-### A 类错误详细分类（AscendC，trace / 诊断用）
+### A 类错误详细分类（AscendC）
 
 | 特征 | 示例 |
 |------|------|
@@ -533,7 +523,6 @@ spawn 说明（自然语言，Codex runtime 按名字识别）：
 |  ├── kernel/                      # AscendC kernel 实现
 |  ├── model_new_tilelang.py        # TileLang 优化实现
 |  ├── model_new_ascendc.py         # AscendC 优化实现
-|  ├── precision_tuning/            # Phase 4.4 spawn 产物：parent_handoff.json / subagent_result.json / forensics_*.json / round_summary_*.json / ...
 |  └── trace.md                     # 执行 trace 记录
 ├── utils/                # 验证、性能分析等工具，禁止修改
 └── archive_tasks/        # 其他历史任务，可作为参考实现
