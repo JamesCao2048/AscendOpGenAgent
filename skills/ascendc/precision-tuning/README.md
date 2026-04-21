@@ -36,7 +36,7 @@ AscendOpGenAgent/
 ```
 
 **上下游依赖**：
-- 上游：`ascend-kernel-developer` 产出 `{task_dir}/kernel/`、`model.py`、`model_new_ascendc.py`、`trace.md`
+- 上游：`ascend-kernel-developer` 产出 `{task_dir}/kernel/`、`model.py`、`model_new_ascendc.py`；Phase 4.4 spawn 场景额外产出 `{task_dir}/precision_tuning/parent_handoff.json`；standalone（前置有完整 run）场景产出 `{task_dir}/trace.md`
 - 下游：`utils/verification_ascendc.py`（评测）、`utils/run_precision_tuning.sh`（批量调度 + 反作弊）
 
 ## 双 Subagent 架构

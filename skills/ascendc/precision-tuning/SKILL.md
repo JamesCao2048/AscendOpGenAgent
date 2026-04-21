@@ -151,11 +151,13 @@ cat "{task_dir}/precision_tuning/round_summary_{N}.json"
 
 **读取**: `{task_dir}/precision_tuning/forensics_report_{attempt}.json`
 
-**可选前置读取（仅 attempt == 0 且文件存在）**: `{task_dir}/trace.md`
+**可选前置读取（仅 attempt == 0，按优先级依次检查）**:
+1. `{task_dir}/precision_tuning/parent_handoff.json` — 由 `ascend-kernel-developer` 在 Phase 4.4 spawn 本 agent 时写入。包含 `phase3_design_summary` / `phase4_translation_summary` / `evaluate_excerpt` / `wrapper_baseline`，用于补全**刚生成就失败**场景的 kernel 设计背景（此时 trace.md 尚未写出）。
+2. `{task_dir}/trace.md` — 由 `ascend-kernel-developer` 在 Phase 7 Trace 记录阶段产出，记录完整生成阶段的迭代历史、走偏点、已知平台/API 限制。仅当上游已完成过一次完整 run（standalone 调优场景）时才存在。
 
-> trace.md 由 `ascend-kernel-developer` 在生成阶段产出，记录 Phase 4 AscendC 转译的迭代历史、走偏点、已知平台/API 限制、kernel 结构意图。读取它可以**避免重蹈生成阶段已走偏的方向**，并补全 kernel 设计背景。文件不存在时跳过，Gate-A 不强制。
+> 读取这些内容可以**避免重蹈生成阶段已走偏的方向**，并补全 kernel 设计背景。两者都不存在时跳过，Gate-A 不强制。若 parent_handoff.json 存在，则 [PRIOR_TRACE_CONTEXT] 在该场景下**必写**（由 cann-debug-agent 的 pre-hook 保证）。
 
-**产出**: `[FORENSICS_SUMMARY]` section + `[PRIOR_TRACE_CONTEXT]`（可选，仅首轮 + trace.md 存在时）
+**产出**: `[FORENSICS_SUMMARY]` section + `[PRIOR_TRACE_CONTEXT]`（可选，仅首轮且 parent_handoff.json 或 trace.md 至少有一个存在时）
 
 逐字段摘录取证报告中的关键数值, 不允许跳过任何字段:
 
@@ -200,30 +202,35 @@ cat "{task_dir}/precision_tuning/round_summary_{N}.json"
     - 是否有数值异常未被 hint 覆盖? <如 sign_analysis 显示偏向但 hint 未提及>
 ```
 
-**可选段（仅当 attempt == 0 且 `{task_dir}/trace.md` 存在时写入）**:
+**可选段（仅当 attempt == 0 且 `parent_handoff.json` 或 `trace.md` 至少存在一个时写入）**:
 
 ```
 [PRIOR_TRACE_CONTEXT]
-  来源: {task_dir}/trace.md (ascend-kernel-developer 生成阶段产出)
-  最终结果: <如 "SKIP (tilelang) | FAIL (ascendc)" 或 "PASS">
-  Phase 4 AscendC 迭代次数: <evaluate_ascendc.sh 执行次数>
+  来源: parent_handoff.json (Phase 4.4 spawn) | trace.md (standalone / Phase 7 产出) | 两者皆有
+  最终结果: <从 handoff.failure_class（"Numerical"）或 trace.md 末尾状态，如 "PASS" / "FAIL (ascendc)">
+  Phase 4 AscendC 迭代次数: <trace 场景: evaluate_ascendc.sh 执行次数；handoff 场景: 1（线性 Phase 4 只跑一次）>
 
   已尝试方向（本轮修复时避免重复）:
     - 第 N 轮: <一句话总结做了什么、结果如何>
     - ...
 
-  走偏点记录（trace.md "走偏点" 章节原文提炼）:
+  走偏点记录（摘自 trace.md "走偏点" 章节 或 handoff.phase4_translation_summary.known_platform_limits）:
     - <如 "把 device kernel 写成模板入口导致 host stub 找不到实际符号">
     - <如 "Muls 在 bfloat16 下不支持, 当前平台 API 限制">
 
   剩余未解决的平台/API 限制:
-    - <trace.md 揭示的硬性约束, 如 "当前平台 Muls 不支持 __bf16">
+    - <trace.md 揭示的硬性约束 或 handoff.phase4_translation_summary.known_platform_limits, 如 "当前平台 Muls 不支持 __bf16">
 
-  kernel 结构要点（若 trace.md 提及）:
+  kernel 结构要点（若来源提及）:
     - <如 "分 fp32/fp16/bf16 三个独立入口">
+
+  (仅 parent_handoff 来源时额外填写)
+  phase3 key choices: <handoff.phase3_design_summary.key_choices>
+  phase4 api usage: <handoff.phase4_translation_summary.api_usage>
+  evaluate 关键失败片段: <handoff.evaluate_excerpt 的 top-3 失败 case>
 ```
 
-> 如 trace.md 不存在, 省略此 section, 不影响 Gate-A。写入时只摘录关键点, **不要**粘贴 trace.md 全文或长代码块。
+> 两者皆不存在时省略此 section, 不影响 Gate-A。写入时只摘录关键点, **不要**粘贴 trace.md / handoff 全文或长代码块。
 
 **知识库检索 (第一次 — 基于取证 hint + 算子类型):**
 
@@ -481,7 +488,7 @@ python3 skills/ascendc/precision-tuning/scripts/precision_knowledge.py search \
 
 **要求**: 根因判断必须基于 2.1~2.3 的具体发现, 不允许"凭直觉"给出根因。证据链中必须引用具体的 K-Step 编号和取证数据字段。
 
-> ⚠️ **若 Sub-step 2.1 产出了 `[PRIOR_TRACE_CONTEXT]`**，`[FIX_PLAN]` 的修复方向**不得**与其"已尝试方向"里的失败路径重复，也**不得**违反"剩余未解决的平台/API 限制"（如 trace.md 明确记录"当前平台 Muls 不支持 __bf16"，则不得在修复中使用 `Muls` 处理 bf16 dtype）。在 `[ROOT_CAUSE].证据链` 里显式引用 trace 中对应的走偏点或平台限制条目。
+> ⚠️ **若 Sub-step 2.1 产出了 `[PRIOR_TRACE_CONTEXT]`**（无论来源是 parent_handoff.json 还是 trace.md），`[FIX_PLAN]` 的修复方向**不得**与其"已尝试方向"里的失败路径重复，也**不得**违反"剩余未解决的平台/API 限制"（如来源明确记录"当前平台 Muls 不支持 __bf16"，则不得在修复中使用 `Muls` 处理 bf16 dtype）。在 `[ROOT_CAUSE].证据链` 里显式引用该上下文中对应的走偏点或平台限制条目。
 
 > ⚠️ **写 [FIX_PLAN] 前必须查阅 `TileLang-AscendC-API-Mapping.md`，核实所有将要使用的 AscendC API 名称**：
 > - 逐元素向量最大值：`Max`（不是 `Vmax`，该 API 不存在）

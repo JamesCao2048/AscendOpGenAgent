@@ -104,33 +104,42 @@ developer_instructions = '''
 > **注意**: 发现式审计不强制预读 lowering 示例，但 Gate-A 仍要求 `[REFERENCE_IMPL_SPEC]` section。
 > 若分析过程中对某 API 规范存疑，主动查阅 `skills/ascendc/ascendc-translator/references/` 相关文件。
 
+## 调用约束（hard gate）
+
+本 agent 仅可由 ascend-kernel-developer 在 Phase 4.4 spawn。**不支持通过 Codex CLI
+直接启动、不支持用户独立调用、不支持被其它 agent spawn**。唯一合法的启动证据是
+{task_dir}/precision_tuning/parent_handoff.json 文件存在且校验通过。
+
+> 本约束由 pre-hook 的 boot gate 兜底执行：没有合法 handoff 的任何启动，一律
+> 立即写 subagent_result.json 为 ABORT 并退出，不跑 forensics、不改 kernel/。
+
 ## Parent-Spawn Handoff Pre-Hook
 
-### 适用场景
-本 agent 既可由 utils/run_precision_tuning.sh 以 standalone 方式启动，
-也可由 ascend-kernel-developer 在 Phase 4.4 spawn。两种场景共用同一组 Step，
-仅在"首轮 Step 2.1 取证数据解读"之前多一个 pre-hook。
-
-### Pre-hook 逻辑（attempt == 0 且本 agent 被 spawn 时）
+### Pre-hook 逻辑（优先于所有其它步骤，包括 Step 0 基线快照 / Step 1 取证）
 
 1. 检查 {task_dir}/precision_tuning/parent_handoff.json 是否存在。
 
-2. 存在时（parent-spawn 路径）：
+2. 存在时（合法的 parent-spawn）：
    - 读入 parent_handoff.json
    - 校验 failure_class == "Numerical" 且 failure_policy == "pure_numerical_only"
-   - 若校验失败，写 subagent_result.json 且 status = ABORT，立即退出
-   - 将 handoff 中以下字段摘录进 [PRIOR_TRACE_CONTEXT] section：
+   - 若校验失败，写 subagent_result.json (status=ABORT,
+     reason="handoff failure_class/policy invalid") 并立即退出
+   - 将 handoff 中以下字段摘录进 [PRIOR_TRACE_CONTEXT] section（parent-spawn
+     场景下该 section 必写，不是可选段）：
      * phase3_design_summary.key_choices
      * phase4_translation_summary.api_usage, known_platform_limits
      * evaluate_excerpt 的 top-3 失败 case + 最大 diff
    - 记住 wrapper_baseline，在结束时写入 subagent_result.json 的 evidence
 
-3. 不存在时（standalone 路径）：
-   - 按原逻辑，attempt == 0 时可选读取 {task_dir}/trace.md
+3. 不存在时（非法启动）：
+   - 立即写 {task_dir}/precision_tuning/subagent_result.json
+     (status=ABORT, reason="parent_handoff.json missing; cann-debug-agent is
+     parent-only, not standalone-invokable")
+   - 不执行 Step 0 基线快照、不调 precision_forensics.py、不碰 kernel/。
+   - 立即结束 session。
 
-4. 无论走哪条路径，之后继续执行原有 Step 1 (precision_forensics.py) 与 Gate-F。
-   Pre-hook 不改变 Gate-A 的必填 section 列表；[PRIOR_TRACE_CONTEXT] 仍是可选段，
-   但 parent-spawn 场景下必须写。
+4. 校验通过后，继续执行原有 Step 0 → Step 1 (precision_forensics.py) → Gate-F。
+   Pre-hook 不改变 Gate-A 的必填 section 列表。
 
 ### 结束时产物：subagent_result.json
 
