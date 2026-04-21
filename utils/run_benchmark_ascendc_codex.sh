@@ -217,6 +217,11 @@ run_worker() {
 
         exec 9>"$LOCK"; flock -x 9
         echo "$row" >> "$REPORT"
+        # 任务完成后立刻增量生成汇总报告（依赖 generate_report_dynamic.py 扫描 trace.md）
+        GEN_REPORT="$(dirname "$0")/generate_report_dynamic.py"
+        if [[ -f "$GEN_REPORT" ]]; then
+            python3 "$GEN_REPORT" -i "$OUTPUT_DIR" -o "$OUTPUT_DIR/final_batch_report.md" >>"$OUTPUT_DIR/report_gen.log" 2>&1 || true
+        fi
         flock -u 9; exec 9>&-
     done
 }
