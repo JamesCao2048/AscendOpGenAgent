@@ -227,102 +227,101 @@ class OperatorTypeDetector:
 
 
 # ============================================================
-# 执行引擎 — 调用 verification_ascendc.py
+# 执行引擎 — spawn _forensics_child.py 子进程, 读回 pickle dumped tensors
 # ============================================================
 
-class OperatorExecutor:
-    """调用 verification_ascendc.py 并解析 stdout 获取数值差异数据。"""
+import pickle
+import shutil
+import tempfile
 
-    def __init__(self, op_name: str, task_dir: str):
+CHILD_SCRIPT = SCRIPT_DIR / "_forensics_child.py"
+
+
+class OperatorExecutor:
+    """Spawn _forensics_child.py subprocess. Child loads model.py +
+    model_new_ascendc.py, runs all input_groups, pickle-dumps per-case
+    tensors to a tmp dir. Parent reads them back for DiffAnalyzer.
+
+    与 utils/verification_ascendc.py 子进程隔离, 避免主进程 sys.path /
+    torch state / extension 污染; child 的 loader 是 verification_ascendc.py
+    的副本 (见 _forensics_child.py 顶部说明) + parity 测试保证语义一致。
+    """
+
+    SUBPROCESS_TIMEOUT_SEC = 1800  # 30 min
+
+    def __init__(self, op_name: str, task_dir: str, attempt: int = 0):
         self.op_name = op_name
-        self.task_dir = Path(task_dir).resolve()
+        self.task_dir = str(Path(task_dir).resolve())
+        self.attempt = attempt
 
     def load_and_execute(self) -> dict:
-        """
-        运行 verification_ascendc.py，解析结构化 stdout。
-        返回 {"stdout", "comparisons", "inputs_meta", "all_passed"}
-        """
-        result = subprocess.run(
-            [sys.executable, str(VERIF_SCRIPT), str(self.task_dir)],
-            capture_output=True, text=True,
-            cwd=str(REPO_ROOT),
-            env={**os.environ,
-                 "ASCEND_RT_VISIBLE_DEVICES": os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "0")},
-        )
-        stdout = result.stdout
-        comparisons = self._parse_comparisons(stdout)
-        inputs_meta = self._parse_inputs(stdout)
-        return {
-            "stdout": stdout,
-            "comparisons": comparisons,
-            "inputs_meta": inputs_meta,
-            "all_passed": result.returncode == 0,
-        }
+        """Returns:
+          {
+            "cases":    [{"case_idx", "ref", "cand", "inputs",
+                          "int8_triggered", "atol", "rtol"}, ...],
+            "metadata": {"status", "num_cases", "device",
+                         "atol_default", "rtol_default",
+                         "int8_atol", "int8_rtol",
+                         "loader_parity_hash", ...},
+          }
 
-    def _parse_comparisons(self, stdout: str) -> list:
+        Raises RuntimeError on child subprocess failure.
         """
-        解析形如:
-          case[0]: output[0]: dtype(ref=float16, cand=float16), unequal_elements=37,
-                   mismatch_ratio=0.289062%, max_abs_diff=0.00390625, mean_abs_diff=0.00390625
-        和:
-          case[0]: output[0]: matched
-        的行。
-        """
-        results = []
-        pattern = re.compile(
-            r"case\[(\d+)\]: output\[(\d+)\]: "
-            r"(?:dtype\(ref=([^,]+), cand=[^)]+\), )?"
-            r"(?:unequal_elements=(\d+), )?"
-            r"mismatch_ratio=([0-9.]+)%, "
-            r"max_abs_diff=([0-9.eE+\-g]+), "
-            r"mean_abs_diff=([0-9.eE+\-g]+)"
-        )
-        matched_pattern = re.compile(r"case\[(\d+)\]: output\[(\d+)\]: matched")
-        for line in stdout.splitlines():
-            m = pattern.search(line)
-            if m:
-                results.append({
-                    "case_idx": int(m.group(1)),
-                    "output_idx": int(m.group(2)),
-                    "dtype": m.group(3) or "unknown",
-                    "ok": False,
-                    "mismatch_ratio": float(m.group(5)),
-                    "max_abs_diff": float(m.group(6)),
-                    "mean_abs_diff": float(m.group(7)),
-                })
-                continue
-            m2 = matched_pattern.search(line)
-            if m2:
-                results.append({
-                    "case_idx": int(m2.group(1)),
-                    "output_idx": int(m2.group(2)),
-                    "ok": True,
-                    "mismatch_ratio": 0.0,
-                    "max_abs_diff": 0.0,
-                    "mean_abs_diff": 0.0,
-                })
-        return results
+        # 使用 task_dir 内的临时目录; 主进程读完 cases 后清理
+        dump_root = Path(self.task_dir) / "precision_tuning" / f".forensics_tmp_{self.attempt}"
+        if dump_root.exists():
+            shutil.rmtree(dump_root)
+        dump_root.mkdir(parents=True, exist_ok=True)
 
-    def _parse_inputs(self, stdout: str) -> list:
-        """解析 Inputs 段，提取 shape/dtype 用于 L6 布局分析。"""
-        results = []
-        in_inputs = False
-        for line in stdout.splitlines():
-            if line.strip() == "Inputs":
-                in_inputs = True
-                continue
-            if line.startswith("-" * 10) and in_inputs:
-                in_inputs = False
-                continue
-            if in_inputs:
-                m = re.search(r"(inputs\[\d+\].*?): Tensor\(shape=(\([^)]*\)), dtype=(\w+)", line)
-                if m:
-                    results.append({
-                        "name": m.group(1),
-                        "shape": m.group(2),
-                        "dtype": m.group(3),
-                    })
-        return results
+        env = {**os.environ}
+        # 保留 caller 已设定的 ASCEND_RT_VISIBLE_DEVICES (不覆盖), 与 bench 一致
+
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(CHILD_SCRIPT), self.task_dir, str(dump_root)],
+                capture_output=True, text=True, env=env,
+                timeout=self.SUBPROCESS_TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"forensics child timed out after {self.SUBPROCESS_TIMEOUT_SEC}s"
+            ) from e
+
+        meta_path = dump_root / "metadata.json"
+        if not meta_path.is_file():
+            raise RuntimeError(
+                f"forensics child produced no metadata.json (rc={proc.returncode})\n"
+                f"stderr: {proc.stderr[-2000:]}"
+            )
+        try:
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"forensics child metadata.json not parseable: {e}") from e
+
+        if metadata.get("status") != "completed" or proc.returncode != 0:
+            raise RuntimeError(
+                f"forensics child failed (rc={proc.returncode}, "
+                f"status={metadata.get('status')}): "
+                f"{metadata.get('error', '<no error>')}\n"
+                f"stderr tail: {proc.stderr[-1500:]}"
+            )
+
+        cases = []
+        for i in range(int(metadata.get("num_cases", 0))):
+            case_path = dump_root / f"case_{i}.pkl"
+            if not case_path.is_file():
+                raise RuntimeError(f"forensics child missing case_{i}.pkl")
+            with case_path.open("rb") as f:
+                cases.append(pickle.load(f))
+
+        return {"cases": cases, "metadata": metadata, "dump_dir": str(dump_root)}
+
+    def cleanup_dump(self, dump_dir: str) -> None:
+        """Remove child's tmp dump dir after analysis. Safe to call twice."""
+        try:
+            shutil.rmtree(dump_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 # ============================================================
