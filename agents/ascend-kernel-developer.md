@@ -44,7 +44,7 @@ Phase 0: 参数确认           (解析 npu, op_file, output_dir)
 Phase 1: 环境准备           (复制算子文件到输出目录)
 Phase 2: INPUT_CASES 精简   (case-simplifier)
 Phase 3: TileLang 设计表达     (tilelang-designer + 退化检测)
-Phase 4: AscendC 转译与验证  (ascendc-translator + 退化检测 + 线性委派 cann-debug-agent)
+Phase 4: AscendC 转译与验证  (ascendc-translator + 退化检测 + 线性委派 ascendc-debug-discovery-agent)
 Phase 5: 性能分析           (performance-analyzer)
 Phase 6: 全量用例验证
 Phase 7: Trace 记录         (trace-recorder)
@@ -66,6 +66,7 @@ Phase 7: Trace 记录         (trace-recorder)
 - 只允许修改或新增 `{output_dir}/` 目录中的文件，不要改动其他目录中的文件。
 - 只允许读取当前工作区目录结构内的文件与子目录；禁止读取当前工作区之外的任何路径，包括父目录、兄弟目录、用户目录、绝对路径以及系统其他目录。
 - archive_tasks目录是历史成功任务，可作为参考实现
+- **参考任何"已有算子实现"时，唯一允许来源是 `archive_tasks/` 子目录**。禁止查阅/引用：仓库外代码、在线搜索结果、其它开源项目、IdeaPool 历史输出、`benchmarks/` / `outputs/` 下的同级算子目录、以及任何形式的复制粘贴既有实现。违反视为作弊（CHEAT），即使结果精度达标也作废。
 
 ### C++ 层反作弊红线（kernel/*.cpp 与 *.h）
 
@@ -86,7 +87,7 @@ Phase 7: Trace 记录         (trace-recorder)
 
 **必须存在的正向信号**：pybind11.cpp 或 host 文件里至少有一处 `<<<...>>>` triple-chevron kernel launch、`aclrtLaunchKernel(...)` 或 `*_do(...)` stub launcher，**否则判 `NO_KERNEL_LAUNCH`**。
 
-**检测时机**：每次生成 / 修改 `kernel/*.cpp` 或 `model_new_ascendc.py` 后，bench 会自动跑 `skills/ascendc/precision-tuning/scripts/anticheat.py verify`，命中即在批量报告标 🚨 CHEAT 并保留 `_anticheat.json` 供审查。**作弊任务不会自动重跑，但会进入人工审查队列**。如果你因平台/API 限制无法实现某算子，请在 Phase 7 trace.md 中如实记录失败原因，不要用 ATen fallback 掩盖。
+**检测时机**：每次生成 / 修改 `kernel/*.cpp` 或 `model_new_ascendc.py` 后，bench 会自动跑 `skills/ascendc/ascendc-debug/scripts/anticheat.py verify`，命中即在批量报告标 🚨 CHEAT 并保留 `_anticheat.json` 供审查。**作弊任务不会自动重跑，但会进入人工审查队列**。如果你因平台/API 限制无法实现某算子，请在 Phase 7 trace.md 中如实记录失败原因，不要用 ATen fallback 掩盖。
 ---
 
 ## Phase 0: 参数确认
@@ -361,7 +362,7 @@ bash skills/ascendc/ascendc-translator/references/evaluate_ascendc.sh \
 - pure numerical fail → 进入 4.4
 - 其它 → Phase 7
 
-### 4.4 委派 cann-debug-agent（spawn）
+### 4.4 委派 ascendc-debug-discovery-agent（spawn）
 
 **Step A: 计算 parent-side wrapper baseline**
 
@@ -404,11 +405,11 @@ schema:
 }
 ```
 
-**Step C: Spawn cann-debug-agent**
+**Step C: Spawn ascendc-debug-discovery-agent**
 
 spawn 说明（自然语言，Codex runtime 按名字识别）：
 
-"spawn cann-debug-agent subagent 执行精度调优。
+"spawn ascendc-debug-discovery-agent subagent 执行精度调优。
  输入契约：`{output_dir}/precision_tuning/parent_handoff.json`。
  目标：让 evaluate_ascendc.sh 全部 case 通过。
  允许修改范围：仅 `{output_dir}/kernel/`。
@@ -547,7 +548,7 @@ spawn 说明（自然语言，Codex runtime 按名字识别）：
 | Phase 3 | TileLang 验证失败 | 记录为辅助检查失败；若属 TileLang 自身问题，可跳过并继续 Phase 4 |
 | Phase 4 | AST 退化检测失败 | 标记 A-AscendCFallback-Type{N}，**直接跳 Phase 7（不 spawn subagent）** |
 | Phase 4 | Build/Import 失败 | 直接跳 Phase 7（不 spawn subagent） |
-| Phase 4 | 纯数值失败 | 写 parent_handoff.json 并 spawn cann-debug-agent；PASS 前 parent 做 anti-cheat 复核 |
+| Phase 4 | 纯数值失败 | 写 parent_handoff.json 并 spawn ascendc-debug-discovery-agent；PASS 前 parent 做 anti-cheat 复核 |
 | Phase 4 | Mixed / Unknown 失败 | 直接跳 Phase 7（不 spawn subagent） |
 | Phase 6 | 全量验证失败 | 记录结果，不修复，继续 Phase 7 |
 | Phase 7 | Trace 记录失败 | 不影响主流程，仅记录失败状态 |

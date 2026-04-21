@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `subagent-driven-development` — this plan is executed in-session by dispatching parallel subagents, with main-agent review between parallelizable groups.
 
-**Goal:** 把两个 Markdown agent 定义迁到 `.codex/agents/*.toml`，把 parent agent 的 Phase 4 从三轮自循环改为"线性 + spawn `cann-debug-agent`"，同时在 subagent 侧加入 handoff pre-hook，保证 standalone 与 parent-spawn 两条路径共存且行为一致。
+**Goal:** 把两个 Markdown agent 定义迁到 `.codex/agents/*.toml`，把 parent agent 的 Phase 4 从三轮自循环改为"线性 + spawn `ascendc-debug-discovery-agent`"，同时在 subagent 侧加入 handoff pre-hook，保证 standalone 与 parent-spawn 两条路径共存且行为一致。
 
 **Architecture:** 两份 agent 定义按"TOML（Codex runtime）+ MD（人类文档 & standalone 脚本入口）"双持；Phase 4 改造与 handoff 合约落在这两份文件上。配合 `.codex/agents/default.toml`（route A）把"`codex` 启动即进入主 agent"做成确定性行为，并用 `.codex/AGENTS.md` 做项目入口说明。
 
@@ -27,7 +27,7 @@
 │  Group B (parallel with A)  ─ Handoff hook    │
 │  ├─ Task B1: .codex/agents/cann-debug-        │
 │  │           agent.toml                       │
-│  └─ Task B2: agents/precision-tuning-         │
+│  └─ Task B2: agents/ascendc-debug-         │
 │              discovery.md                     │
 └──────────────────────────────────────────────┘
           │ (A & B both done)
@@ -126,7 +126,7 @@ bash skills/ascendc/ascendc-translator/references/evaluate_ascendc.sh \
 - pure numerical fail → 进入 4.4
 - 其它 → Phase 7
 
-### 4.4 委派 cann-debug-agent（spawn）
+### 4.4 委派 ascendc-debug-discovery-agent（spawn）
 
 **Step A: 计算 parent-side wrapper baseline**
 
@@ -165,10 +165,10 @@ schema:
   }
 }
 
-**Step C: Spawn cann-debug-agent**
+**Step C: Spawn ascendc-debug-discovery-agent**
 
 spawn 说明（自然语言，Codex runtime 按名字识别）：
-"spawn cann-debug-agent subagent 执行精度调优。
+"spawn ascendc-debug-discovery-agent subagent 执行精度调优。
  输入契约：{output_dir}/precision_tuning/parent_handoff.json。
  目标：让 evaluate_ascendc.sh 全部 case 通过。
  允许修改范围：仅 {output_dir}/kernel/。
@@ -198,7 +198,7 @@ ABORT → 跳到 Phase 7，trace 标 subagent_abort
 
 | 约束 | 说明 |
 |------|------|
-| Phase 4 不再有 parent 自循环 | 线性执行；数值失败委派 cann-debug-agent subagent |
+| Phase 4 不再有 parent 自循环 | 线性执行；数值失败委派 ascendc-debug-discovery-agent subagent |
 | Phase 4.4 的 subagent 最多 2 轮 | 等同 precision_gate.py 的 MAX_ATTEMPTS |
 | 禁止 PyTorch 退化 | 同原文 |
 | 退化检测前置 | 同原文，但只做一次 |
@@ -208,7 +208,7 @@ ABORT → 跳到 Phase 7，trace 标 subagent_abort
 **Step 4: 同步更新"约束"、"错误处理"、"任务目录结构"等次要段**
 
 - "约束"表：删除 `Phase 4 最大迭代 3 次`；改为 `Phase 4 subagent 最多 2 轮（由 precision_gate.py MAX_ATTEMPTS 约束）`。
-- "错误处理"表：Phase 4 三行压缩为三项：AST 退化 → Phase 7；Build/Import → Phase 7；数值失败 → spawn cann-debug-agent。
+- "错误处理"表：Phase 4 三行压缩为三项：AST 退化 → Phase 7；Build/Import → Phase 7；数值失败 → spawn ascendc-debug-discovery-agent。
 - 保留 "AscendC 退化子类型"、"A 类错误分类（AscendC）"、"B 类错误分类" 这些表（trace/诊断文档仍需引用）。
 
 **Step 5: 落盘**
@@ -218,7 +218,7 @@ ABORT → 跳到 Phase 7，trace 标 subagent_abort
 **Acceptance:**
 - `python3 -c "import tomllib; tomllib.load(open('.codex/agents/ascend-kernel-developer.toml','rb'))"` 返回 0
 - 文件里无 `while ac_iteration` / `max_ac_iterations = 3` / `ac_history_attempts` 等原循环变量
-- 文件里存在 `cann-debug-agent` / `parent_handoff.json` / `subagent_result.json` / `wrapper_baseline` 关键字
+- 文件里存在 `ascendc-debug-discovery-agent` / `parent_handoff.json` / `subagent_result.json` / `wrapper_baseline` 关键字
 
 ---
 
@@ -241,17 +241,17 @@ ABORT → 跳到 Phase 7，trace 标 subagent_abort
 
 ---
 
-## Task B1: 写 `.codex/agents/cann-debug-agent.toml`
+## Task B1: 写 `.codex/agents/ascendc-debug-discovery-agent.toml`
 
 **Files:**
-- Create: `.codex/agents/cann-debug-agent.toml`
-- Reference-read: `agents/precision-tuning-discovery.md`
+- Create: `.codex/agents/ascendc-debug-discovery-agent.toml`
+- Reference-read: `agents/ascendc-debug-discovery.md`
 
 **Step 1: 构造 TOML 骨架**
 
 ```toml
-name = "cann-debug-agent"
-description = "AscendC kernel 精度调优 subagent（发现式审计）。由 ascend-kernel-developer 在 Phase 4.4 数值失败时 spawn，或通过 utils/run_precision_tuning.sh standalone 启动。只修改 {task_dir}/kernel/。"
+name = "ascendc-debug-discovery-agent"
+description = "AscendC kernel 精度调优 subagent（发现式审计）。由 ascend-kernel-developer 在 Phase 4.4 数值失败时 spawn，或通过 utils/run_ascendc_debug.sh standalone 启动。只修改 {task_dir}/kernel/。"
 
 developer_instructions = """
 <正文>
@@ -260,7 +260,7 @@ developer_instructions = """
 
 **Step 2: 正文移植**
 
-从 `agents/precision-tuning-discovery.md` 第 25 行（`# System Prompt`）开始整体复制。
+从 `agents/ascendc-debug-discovery.md` 第 25 行（`# System Prompt`）开始整体复制。
 
 保留原文所有 section（Role Definition / Core Capabilities / Operational Guidelines / 反作弊约束 / Communication Style / Environment）不动。
 
@@ -272,7 +272,7 @@ developer_instructions = """
 ## Parent-Spawn Handoff Pre-Hook
 
 ### 适用场景
-本 agent 既可由 utils/run_precision_tuning.sh 以 standalone 方式启动，
+本 agent 既可由 utils/run_ascendc_debug.sh 以 standalone 方式启动，
 也可由 ascend-kernel-developer 在 Phase 4.4 spawn。两种场景共用同一组 Step，
 仅在"首轮 Step 2.1 取证数据解读"之前多一个 pre-hook。
 
@@ -326,19 +326,19 @@ subagent_result.json 由本 agent 自己写，不由 precision_gate.py 写。
 
 **Step 4: 落盘**
 
-写入 `/Users/junming/code/operator/AscendOpGenAgent/.codex/agents/cann-debug-agent.toml`。
+写入 `/Users/junming/code/operator/AscendOpGenAgent/.codex/agents/ascendc-debug-discovery-agent.toml`。
 
 **Acceptance:**
-- `python3 -c "import tomllib; tomllib.load(open('.codex/agents/cann-debug-agent.toml','rb'))"` 返回 0
+- `python3 -c "import tomllib; tomllib.load(open('.codex/agents/ascendc-debug-discovery-agent.toml','rb'))"` 返回 0
 - 文件含 `parent_handoff.json`、`subagent_result.json`、`failure_class == "Numerical"`、`MAX_ATTEMPTS` 或 `上限 2` 等关键字
-- `name = "cann-debug-agent"` 行存在（不是 `precision-tuning-discovery`）
+- `name = "ascendc-debug-discovery-agent"` 行存在（不是 `ascendc-debug-discovery`）
 
 ---
 
-## Task B2: 同步 `agents/precision-tuning-discovery.md`（Plan Y）
+## Task B2: 同步 `agents/ascendc-debug-discovery.md`（Plan Y）
 
 **Files:**
-- Modify: `agents/precision-tuning-discovery.md`（在"Operational Guidelines"之后、"Communication Style"之前插入 handoff pre-hook 段）
+- Modify: `agents/ascendc-debug-discovery.md`（在"Operational Guidelines"之后、"Communication Style"之前插入 handoff pre-hook 段）
 
 **Step 1: 插入 pre-hook**
 
@@ -346,13 +346,13 @@ subagent_result.json 由本 agent 自己写，不由 precision_gate.py 写。
 
 **Step 2: 不改 agent 名**
 
-保留原文 front-matter 的 `name: precision-tuning-discovery`，不改为 `cann-debug-agent`。
+保留原文 front-matter 的 `name: ascendc-debug-discovery`，不改为 `ascendc-debug-discovery-agent`。
 
-原因：`utils/run_precision_tuning.sh` 显式把 `agents/precision-tuning-discovery.md` 的路径注入 prompt；改名会破坏 standalone 调度。TOML 侧叫 `cann-debug-agent` 只影响 Codex runtime。
+原因：`utils/run_ascendc_debug.sh` 显式把 `agents/ascendc-debug-discovery.md` 的路径注入 prompt；改名会破坏 standalone 调度。TOML 侧叫 `ascendc-debug-discovery-agent` 只影响 Codex runtime。
 
 **Acceptance:**
-- `agents/precision-tuning-discovery.md` 新段内容与 `.codex/agents/cann-debug-agent.toml` handoff pre-hook 段对应
-- `run_precision_tuning.sh` 的 `AGENT_FILE` 默认值 `agents/precision-tuning-discovery.md` 仍有效（grep 确认）
+- `agents/ascendc-debug-discovery.md` 新段内容与 `.codex/agents/ascendc-debug-discovery-agent.toml` handoff pre-hook 段对应
+- `run_ascendc_debug.sh` 的 `AGENT_FILE` 默认值 `agents/ascendc-debug-discovery.md` 仍有效（grep 确认）
 
 ---
 
@@ -365,7 +365,7 @@ subagent_result.json 由本 agent 自己写，不由 precision_gate.py 写。
 
 ```toml
 name = "default"
-description = "AscendOpGenAgent 仓库默认 agent：任何 AscendC 算子生成任务，请立即 spawn ascend-kernel-developer；任何精度调优任务，请立即 spawn cann-debug-agent。"
+description = "AscendOpGenAgent 仓库默认 agent：任何 AscendC 算子生成任务，请立即 spawn ascend-kernel-developer；任何精度调优任务，请立即 spawn ascendc-debug-discovery-agent。"
 
 developer_instructions = """
 你运行在 AscendOpGenAgent 仓库中。本仓库的核心任务是"基于 PyTorch Model 生成 AscendC 算子"。
@@ -377,7 +377,7 @@ developer_instructions = """
    - 不要自己做 codegen。
 
 2. 若用户请求"精度调优"（典型输入格式：`precision tune <task_name> [npu=<NPU>]`）：
-   - 立即 spawn `cann-debug-agent` subagent。
+   - 立即 spawn `ascendc-debug-discovery-agent` subagent。
    - 不要自己做精度分析。
 
 3. 其它编排型任务（查看历史、分析 trace、调度 batch）：
@@ -387,8 +387,8 @@ developer_instructions = """
 
 - `agents/` — 人类可读的 agent 定义（Markdown）
 - `.codex/agents/` — Codex 加载的 agent 定义（TOML）
-- `skills/ascendc/` — 子技能（tilelang-designer / ascendc-translator / precision-tuning / ...）
-- `utils/run_precision_tuning.sh` — 精度调优批量调度器（standalone 路径）
+- `skills/ascendc/` — 子技能（tilelang-designer / ascendc-translator / ascendc-debug / ...）
+- `utils/run_ascendc_debug.sh` — 精度调优批量调度器（standalone 路径）
 - `utils/run_benchmark_ascendc_codex.sh` — benchmark 批量调度器
 
 ## 语言
@@ -424,14 +424,14 @@ developer_instructions = """
 
 ## ascend-kernel-developer
 `.codex/agents/ascend-kernel-developer.toml`
-端到端 AscendC 算子生成主 agent。Phase 4 数值失败时 spawn `cann-debug-agent`
+端到端 AscendC 算子生成主 agent。Phase 4 数值失败时 spawn `ascendc-debug-discovery-agent`
 做精度调优。人类可读版本：`agents/ascend-kernel-developer.md`。
 
-## cann-debug-agent
-`.codex/agents/cann-debug-agent.toml`
+## ascendc-debug-discovery-agent
+`.codex/agents/ascendc-debug-discovery-agent.toml`
 AscendC kernel 精度调优 subagent（发现式审计）。支持两种启动方式：
 - 由 ascend-kernel-developer 在 Phase 4.4 spawn（读 parent_handoff.json）
-- 由 utils/run_precision_tuning.sh standalone 启动（读 agents/precision-tuning-discovery.md）
+- 由 utils/run_ascendc_debug.sh standalone 启动（读 agents/ascendc-debug-discovery.md）
 
 ---
 
@@ -460,7 +460,7 @@ for p in pathlib.Path('.codex/agents').glob('*.toml'):
 "
 ```
 
-运行时：在仓库根目录运行 `codex` 进入交互模式，输入 `spawn cann-debug-agent for task foo`，
+运行时：在仓库根目录运行 `codex` 进入交互模式，输入 `spawn ascendc-debug-discovery-agent for task foo`，
 观察 runtime 是否识别 custom agent（若报错 agent not found，说明 TOML 加载失败）。
 ```
 
@@ -487,7 +487,7 @@ sys.exit(0 if ok else 1)
 "
 ```
 
-预期：三个文件（`default.toml`、`ascend-kernel-developer.toml`、`cann-debug-agent.toml`）全部 `OK`，每个 name 字段非 `<missing>`。
+预期：三个文件（`default.toml`、`ascend-kernel-developer.toml`、`ascendc-debug-discovery-agent.toml`）全部 `OK`，每个 name 字段非 `<missing>`。
 
 **Step 2: Codex runtime loader smoke test**
 
@@ -524,8 +524,8 @@ git commit -m "$(cat <<'EOF'
 feat: add .codex TOML agents with Phase 4 subagent delegation
 
 - .codex/agents/ascend-kernel-developer.toml: port agent with linearized Phase 4
-  (removed 3-round self-loop, delegate pure-numerical failures to cann-debug-agent)
-- .codex/agents/cann-debug-agent.toml: port precision-tuning-discovery with
+  (removed 3-round self-loop, delegate pure-numerical failures to ascendc-debug-discovery-agent)
+- .codex/agents/ascendc-debug-discovery-agent.toml: port ascendc-debug-discovery with
   handoff pre-hook reading {task_dir}/precision_tuning/parent_handoff.json
 - .codex/agents/default.toml: override default agent to auto-route to the two
   above based on user request shape
@@ -534,7 +534,7 @@ feat: add .codex TOML agents with Phase 4 subagent delegation
 - .planning/task_plan.md: implementation plan
 
 Phase 4.4 protocol:
-- Only "pure numerical failure" spawns cann-debug-agent (build/import/mixed/AST
+- Only "pure numerical failure" spawns ascendc-debug-discovery-agent (build/import/mixed/AST
   go to Phase 7)
 - Parent writes parent_handoff.json with wrapper sha256 baseline
 - Subagent writes subagent_result.json on completion (owner = subagent, not gate)
@@ -549,7 +549,7 @@ EOF
 再 commit .md 同步：
 
 ```bash
-git add agents/ascend-kernel-developer.md agents/precision-tuning-discovery.md
+git add agents/ascend-kernel-developer.md agents/ascendc-debug-discovery.md
 git commit -m "$(cat <<'EOF'
 sync: mirror Phase 4 linearization + handoff pre-hook to agents/*.md
 
@@ -557,8 +557,8 @@ Keep agents/*.md as human-readable / standalone-path source of truth in sync
 with .codex/agents/*.toml:
 - ascend-kernel-developer.md: Phase 4 rewritten as linear + spawn (no
   parent self-loop)
-- precision-tuning-discovery.md: add Parent-Spawn Handoff Pre-Hook section
-  (name field unchanged so run_precision_tuning.sh --agent default keeps working)
+- ascendc-debug-discovery.md: add Parent-Spawn Handoff Pre-Hook section
+  (name field unchanged so run_ascendc_debug.sh --agent default keeps working)
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF

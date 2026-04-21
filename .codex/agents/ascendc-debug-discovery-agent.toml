@@ -1,5 +1,5 @@
-name = "cann-debug-agent"
-description = "AscendC kernel 精度调优 subagent（发现式审计）。由 ascend-kernel-developer 在 Phase 4.4 数值失败时 spawn，或通过 utils/run_precision_tuning.sh standalone 启动。只修改 {task_dir}/kernel/。"
+name = "ascendc-debug-discovery-agent"
+description = "AscendC kernel 精度调优 subagent（发现式审计）。由 ascend-kernel-developer 在 Phase 4.4 数值失败时 spawn，或通过 utils/run_ascendc_debug.sh standalone 启动。只修改 {task_dir}/kernel/。"
 
 developer_instructions = '''
 # System Prompt
@@ -90,7 +90,7 @@ developer_instructions = '''
 - 不允许标量逐元素 Python `for` 循环代替 kernel
 
 **Bench 端检测机制（你必须知道，否则会被判作弊）**:
-1. **Hash 对比**: `run_precision_tuning.sh` 在 codex 启动前保存 `model_new_ascendc.py` / `model_new_tilelang.py` 的 sha256 基线，结束后对比；**hash 变化 = 作弊**
+1. **Hash 对比**: `run_ascendc_debug.sh` 在 codex 启动前保存 `model_new_ascendc.py` / `model_new_tilelang.py` 的 sha256 基线，结束后对比；**hash 变化 = 作弊**
 2. **AST 退化检测**: 调用 `skills/ascendc/ascendc-translator/scripts/validate_ascendc_impl.py` 检测 4 类退化（无扩展导入 / 未调用 kernel / 部分用 torch / 标量 for 循环）；**任一命中 = 作弊**
 
 **违规后果**:
@@ -133,7 +133,7 @@ developer_instructions = '''
 
 3. 不存在时（非法启动）：
    - 立即写 {task_dir}/precision_tuning/subagent_result.json
-     (status=ABORT, reason="parent_handoff.json missing; cann-debug-agent is
+     (status=ABORT, reason="parent_handoff.json missing; ascendc-debug-discovery-agent is
      parent-only, not standalone-invokable")
    - 不执行 Step 0 基线快照、不调 precision_forensics.py、不碰 kernel/。
    - 立即结束 session。

@@ -1,5 +1,5 @@
 ---
-name: precision-tuning-discovery
+name: ascendc-debug-discovery
 description: AscendC 算子精度调优 Agent（发现式审计）— 依赖 agent 自身 AscendC 知识从取证数据直接推理根因，不强制预读参考示例
 temperature: 0.1
 
@@ -11,7 +11,7 @@ tools:
   read: true
 
 skills:
-  - precision-tuning
+  - ascendc-debug
 
 argument-hint: >
   输入格式: "precision tune {task_name} [npu={NPU_ID}]"
@@ -110,7 +110,7 @@ argument-hint: >
 - 不允许标量逐元素 Python `for` 循环代替 kernel
 
 **Bench 端检测机制（你必须知道，否则会被判作弊）**:
-1. **Hash 对比**: `run_precision_tuning.sh` 在 codex 启动前保存 `model_new_ascendc.py` / `model_new_tilelang.py` 的 sha256 基线，结束后对比；**hash 变化 = 作弊**
+1. **Hash 对比**: `run_ascendc_debug.sh` 在 codex 启动前保存 `model_new_ascendc.py` / `model_new_tilelang.py` 的 sha256 基线，结束后对比；**hash 变化 = 作弊**
 2. **AST 退化检测**: 调用 `skills/ascendc/ascendc-translator/scripts/validate_ascendc_impl.py` 检测 4 类退化（无扩展导入 / 未调用 kernel / 部分用 torch / 标量 for 循环）；**任一命中 = 作弊**
 
 **违规后果**:
@@ -127,7 +127,7 @@ argument-hint: >
 ## Parent-Spawn Handoff Pre-Hook
 
 ### 适用场景
-本 agent 既可由 utils/run_precision_tuning.sh 以 standalone 方式启动，
+本 agent 既可由 utils/run_ascendc_debug.sh 以 standalone 方式启动，
 也可由 ascend-kernel-developer 在 Phase 4.4 spawn。两种场景共用同一组 Step，
 仅在"首轮 Step 2.1 取证数据解读"之前多一个 pre-hook。
 

@@ -5,9 +5,9 @@
 # 谁先完成当前任务，就从共享队列拉下一个，不做预分配。
 #
 # 典型用法:
-#   bash utils/run_precision_tuning.sh \
+#   bash utils/run_ascendc_debug.sh \
 #        --task-list tasks/precision_tasks.txt \
-#        --agent agents/precision-tuning-discovery.md \
+#        --agent agents/ascendc-debug-discovery.md \
 #        --containers cjm_cann1,cjm_cann2 \
 #        --npus 0,1 \
 #        --output /home/c00959374/AscendOpGenAgent/outputs/precision_$(date +%Y%m%d_%H%M)
@@ -24,7 +24,7 @@ set -euo pipefail
 # ── 默认值 ──
 TASK_LIST=""
 TASK_DIRS=""
-AGENT_FILE="agents/precision-tuning-discovery.md"
+AGENT_FILE="agents/ascendc-debug-discovery.md"
 CONTAINERS=""
 NPUS=""
 OUTPUT_DIR=""
@@ -45,13 +45,13 @@ PROMPT_TEMPLATE='严格按照 __AGENT_FILE__ 中定义的 agent 规范执行算�
    严禁修改 __TASK_DIR__/model_new_ascendc.py、__TASK_DIR__/model_new_tilelang.py、__TASK_DIR__/model.py；
    任何通过改写 wrapper 引入 PyTorch 退化路径、绕过 kernel 调用、或用 torch.* / F.* 计算掩盖精度失败的行为均视为作弊；
    bench 在任务前后会对 wrapper 文件做 sha256 hash 对比 + validate_ascendc_impl.py AST 退化检测，命中即自动恢复 baseline 并将任务标记为 🚨 CHEAT。
-4. 精度调优脚本路径: __WORKDIR__/skills/ascendc/precision-tuning/scripts/
+4. 精度调优脚本路径: __WORKDIR__/skills/ascendc/ascendc-debug/scripts/
 5. NPU 设备已通过环境变量 ASCEND_RT_VISIBLE_DEVICES=__NPU__ 暴露
 6. 若 precision_forensics.py / precision_gate.py 需要 --task-dir 参数，使用 __TASK_DIR__
 7. 全程不要向用户询问或等待交互；遇到分支/决策均按 agent 规范定义的默认路径处理
 8. 结束时输出精度调优结果摘要（是否通过、最终 max_abs_diff、修改了哪些 kernel/ 文件）'
 
-ANTICHEAT_SCRIPT="skills/ascendc/precision-tuning/scripts/anticheat.py"
+ANTICHEAT_SCRIPT="skills/ascendc/ascendc-debug/scripts/anticheat.py"
 
 # ── 参数解析 ──
 while [[ $# -gt 0 ]]; do

@@ -1,5 +1,5 @@
 ---
-name: precision-tuning
+name: ascendc-debug
 description: >
   修复编译通过但精度测试失败的 AscendC 算子。
   通过数值取证 + Agent 深度分析 + 代码修复 + 重新验证的循环实现精度调优。
@@ -94,13 +94,13 @@ cp "{task_dir}/model_new_ascendc.py" \
 > 这样可以覆盖“Phase 1 仅复制目录、尚未 build”的首轮场景，避免 `ModuleNotFoundError: No module named '_xxx_ext'`。
 
 ```bash
-python3 skills/ascendc/precision-tuning/scripts/precision_forensics.py \
+python3 skills/ascendc/ascendc-debug/scripts/precision_forensics.py \
     {task_name} --attempt {attempt}
 ```
 
 Gate 验证:
 ```bash
-python3 skills/ascendc/precision-tuning/scripts/precision_gate.py \
+python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
     --step forensics --op-name {op_name} --task-name {task_name} --attempt {attempt}
 ```
 
@@ -155,7 +155,7 @@ cat "{task_dir}/precision_tuning/round_summary_{N}.json"
 1. `{task_dir}/precision_tuning/parent_handoff.json` — 由 `ascend-kernel-developer` 在 Phase 4.4 spawn 本 agent 时写入。包含 `phase3_design_summary` / `phase4_translation_summary` / `evaluate_excerpt` / `wrapper_baseline`，用于补全**刚生成就失败**场景的 kernel 设计背景（此时 trace.md 尚未写出）。
 2. `{task_dir}/trace.md` — 由 `ascend-kernel-developer` 在 Phase 7 Trace 记录阶段产出，记录完整生成阶段的迭代历史、走偏点、已知平台/API 限制。仅当上游已完成过一次完整 run（standalone 调优场景）时才存在。
 
-> 读取这些内容可以**避免重蹈生成阶段已走偏的方向**，并补全 kernel 设计背景。两者都不存在时跳过，Gate-A 不强制。若 parent_handoff.json 存在，则 [PRIOR_TRACE_CONTEXT] 在该场景下**必写**（由 cann-debug-agent 的 pre-hook 保证）。
+> 读取这些内容可以**避免重蹈生成阶段已走偏的方向**，并补全 kernel 设计背景。两者都不存在时跳过，Gate-A 不强制。若 parent_handoff.json 存在，则 [PRIOR_TRACE_CONTEXT] 在该场景下**必写**（由 ascendc-debug-discovery-agent 的 pre-hook 保证）。
 
 **产出**: `[FORENSICS_SUMMARY]` section + `[PRIOR_TRACE_CONTEXT]`（可选，仅首轮且 parent_handoff.json 或 trace.md 至少有一个存在时）
 
@@ -236,8 +236,8 @@ cat "{task_dir}/precision_tuning/round_summary_{N}.json"
 
 从 `[FORENSICS_SUMMARY]` 中提取 `primary_hint` 和 `op_type`, 检索相关知识条目:
 ```bash
-python3 skills/ascendc/precision-tuning/scripts/precision_knowledge.py search \
-    --kb-path skills/ascendc/precision-tuning/references/precision_knowledge_base.json \
+python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
+    --kb-path skills/ascendc/ascendc-debug/references/precision_knowledge_base.json \
     --op-type <L8_operator.op_type> \
     --pattern <primary_hint> \
     --top-k 3 \
@@ -471,8 +471,8 @@ python3 skills/ascendc/precision-tuning/scripts/precision_knowledge.py search \
 - 若无明显位置特征 → 不传 `--position`
 
 ```bash
-python3 skills/ascendc/precision-tuning/scripts/precision_knowledge.py search \
-    --kb-path skills/ascendc/precision-tuning/references/precision_knowledge_base.json \
+python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
+    --kb-path skills/ascendc/ascendc-debug/references/precision_knowledge_base.json \
     --op-type <L8_operator.op_type> \
     --pattern <primary_hint> \
     --position <tail/boundary/scattered 或不传> \
@@ -548,7 +548,7 @@ python3 skills/ascendc/precision-tuning/scripts/precision_knowledge.py search \
 
 Gate 验证:
 ```bash
-python3 skills/ascendc/precision-tuning/scripts/precision_gate.py \
+python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
     --step audit --op-name {op_name} --task-name {task_name} --attempt {attempt}
 ```
 
@@ -570,7 +570,7 @@ python3 skills/ascendc/precision-tuning/scripts/precision_gate.py \
 
 修复完成后, Gate 验证代码文件完整性:
 ```bash
-python3 skills/ascendc/precision-tuning/scripts/precision_gate.py \
+python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
     --step fix --op-name {op_name} --task-name {task_name} --attempt {attempt}
 ```
 
@@ -625,7 +625,7 @@ bash skills/ascendc/ascendc-translator/references/evaluate_ascendc.sh {task_name
 
 **Gate 验证 + 循环控制:**
 ```bash
-python3 skills/ascendc/precision-tuning/scripts/precision_gate.py \
+python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
     --step validate --op-name {op_name} --task-name {task_name} --attempt {attempt}
 ```
 
@@ -764,8 +764,8 @@ echo "精度通过，current_best 已更新为 100.0"
 
 **5.3 写入知识库 (Python 执行):**
 ```bash
-python3 skills/ascendc/precision-tuning/scripts/precision_knowledge.py dump \
-    --kb-path skills/ascendc/precision-tuning/references/precision_knowledge_base.json \
+python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py dump \
+    --kb-path skills/ascendc/ascendc-debug/references/precision_knowledge_base.json \
     --task-name {task_name} \
     --op-name {op_name}
 ```
