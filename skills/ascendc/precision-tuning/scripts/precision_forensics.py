@@ -31,6 +31,9 @@ import traceback
 from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
+import torch
+
 SCRIPT_DIR   = Path(__file__).resolve().parent          # scripts/
 SKILL_DIR    = SCRIPT_DIR.parent                        # precision-tuning/
 REPO_ROOT    = SKILL_DIR.parent.parent.parent           # AscendOpGenAgent/
@@ -251,6 +254,302 @@ class HistoryComparator:
     def _improving(self, trend):
         ratios = [t["mismatch_ratio"] for t in trend if t["mismatch_ratio"] is not None]
         return ratios[-1] < ratios[-2] if len(ratios) >= 2 else True
+
+
+# ============================================================
+# L1-L4 数值 Diff 分析
+# ============================================================
+#
+# 语义边界（与 utils/verification_ascendc.py 对齐）:
+#   - ATOL/RTOL 与 verification 保持一致 (atol=1e-2, rtol=1e-2); int8 特判时切
+#     atol=1.5, rtol=0.0（由 caller 通过 analyzer.ATOL/analyzer.RTOL 覆盖）。
+#   - mismatch mask = abs(golden - actual) > ATOL + RTOL * abs(golden)。
+#   - 本模块不做 torch.nan_to_num 替换；caller 若要与 verification pass/fail 一致，
+#     应在传入前对 golden/actual 做 nan_to_num(nan=0, posinf=1e9, neginf=-1e9)。
+#   - value_range 里仍记录原始 NaN/Inf 计数（caller 需传原始 tensor 的 numpy 视图
+#     做 value_range 分析，或在 pre-nan-to-num 快照上额外跑）。
+#
+# 所有方法接收 np.ndarray (CPU, float32 upcast 后)，不依赖 torch / torch_npu。
+
+class DiffAnalyzer:
+
+    ATOL = 1e-02
+    RTOL = 1e-02
+
+    def __init__(self, op_type_info: dict = None):
+        self.op_type_info = op_type_info or {"op_type": "unknown", "pattern_priority": []}
+
+    def analyze(self, golden: np.ndarray, actual: np.ndarray) -> dict:
+        abs_diff = np.abs(golden - actual)
+        threshold = self.ATOL + self.RTOL * np.abs(golden)
+        mismatch_mask = abs_diff > threshold
+
+        return {
+            "pass_fail": bool(np.sum(mismatch_mask) == 0),
+            "basic_stats": self._basic_stats(golden, actual, abs_diff, mismatch_mask),
+            "error_distribution": self._error_distribution(golden, actual, abs_diff),
+            "value_range": self._value_range(golden, actual),
+            "pattern_hint": self._classify_pattern(golden, actual, abs_diff, mismatch_mask),
+            "worst_elements": self._worst_elements(abs_diff, golden, actual, top_k=10),
+            "tail_analysis": self._tail_analysis(abs_diff, mismatch_mask, golden.shape),
+            "dimension_analysis": self._dimension_analysis(abs_diff, mismatch_mask, golden.shape),
+            "L5_intermediate": None,
+            "L7_code_mapping": None,
+            "L8_op_type": self.op_type_info.get("op_type", "unknown"),
+        }
+
+    # ---- L1 ----
+
+    def _basic_stats(self, golden, actual, abs_diff, mismatch_mask) -> dict:
+        total = max(golden.size, 1)
+        n = int(np.sum(mismatch_mask))
+        return {
+            "max_abs_diff": float(np.max(abs_diff)),
+            "mean_abs_diff": float(np.mean(abs_diff)),
+            "median_abs_diff": float(np.median(abs_diff)),
+            "p99_abs_diff": float(np.percentile(abs_diff, 99)),
+            "num_mismatched": n,
+            "total_elements": int(golden.size),
+            "mismatch_ratio": n / total,
+            "match_rate": 1.0 - n / total,
+            "int8_special_tolerance": False,   # caller 在 int8 路径下设为 True
+        }
+
+    def _error_distribution(self, golden, actual, abs_diff) -> dict:
+        diff_signed = (actual - golden).flatten()
+        abs_flat = abs_diff.flatten()
+        percentiles = [10, 25, 50, 75, 90, 95, 99]
+        quartile = {f"p{p}": float(np.percentile(abs_flat, p)) for p in percentiles}
+
+        golden_flat = golden.flatten()
+        safe = np.abs(golden_flat) > 1e-7
+        rel = np.zeros_like(abs_flat)
+        if np.any(safe):
+            rel[safe] = abs_flat[safe] / np.abs(golden_flat[safe])
+
+        n_pos = int(np.sum(diff_signed > 0))
+        n_neg = int(np.sum(diff_signed < 0))
+        return {
+            "abs_diff_percentiles": quartile,
+            "rel_error_mean": float(np.mean(rel)),
+            "rel_error_max": float(min(np.max(rel), 1e6)),
+            "sign_analysis": {
+                "positive_count": n_pos,
+                "negative_count": n_neg,
+                "zero_count": int(np.sum(diff_signed == 0)),
+                "bias_direction": "positive" if n_pos > n_neg * 1.5
+                                  else "negative" if n_neg > n_pos * 1.5
+                                  else "balanced",
+                "mean_signed_diff": float(np.mean(diff_signed)),
+            },
+        }
+
+    def _value_range(self, golden, actual) -> dict:
+        def _s(arr, name):
+            return {
+                f"{name}_min": float(np.min(arr)), f"{name}_max": float(np.max(arr)),
+                f"{name}_mean": float(np.mean(arr)), f"{name}_std": float(np.std(arr)),
+                f"{name}_has_nan": bool(np.any(np.isnan(arr))),
+                f"{name}_has_inf": bool(np.any(np.isinf(arr))),
+                f"{name}_nan_count": int(np.sum(np.isnan(arr))),
+                f"{name}_inf_count": int(np.sum(np.isinf(arr))),
+            }
+        r = {}
+        r.update(_s(golden, "golden"))
+        r.update(_s(actual, "actual"))
+        return r
+
+    # ---- L2/L3: Pattern Hint (含语义加权) ----
+
+    def _classify_pattern(self, golden, actual, abs_diff, mismatch_mask) -> dict:
+        shape = golden.shape
+        total = max(golden.size, 1)
+        mismatch_ratio = np.sum(mismatch_mask) / total
+        hints = []
+
+        nan_n = int(np.sum(np.isnan(actual)))
+        inf_n = int(np.sum(np.isinf(actual)))
+        if nan_n > 0 or inf_n > 0:
+            hints.append({"pattern": "nan_inf_contamination", "confidence": 0.95,
+                          "evidence": f"NPU 输出含 NaN={nan_n}, Inf={inf_n}"})
+
+        if mismatch_ratio > 0.9:
+            dv = (actual - golden).flatten()
+            dm, ds = float(np.mean(dv)), float(np.std(dv))
+            if ds < 0.1 * abs(dm) and abs(dm) > 1e-3:
+                hints.append({"pattern": "uniform_offset", "confidence": 0.85,
+                              "evidence": f"全局偏移 mean={dm:.6f}, std={ds:.6f}"})
+            else:
+                hints.append({"pattern": "all_wrong", "confidence": 0.9,
+                              "evidence": f"mismatch={mismatch_ratio:.1%}"})
+
+        t = self._check_tail_spike(mismatch_mask, shape)
+        if t:
+            hints.append(t)
+        if len(shape) >= 2:
+            c = self._check_dim_concentration(mismatch_mask, shape)
+            if c:
+                hints.append(c)
+        m = self._check_magnitude_correlation(golden, mismatch_mask)
+        if m:
+            hints.append(m)
+        b = self._check_boundary_concentration(mismatch_mask, shape)
+        if b:
+            hints.append(b)
+
+        if not hints:
+            hints.append({"pattern": "scattered", "confidence": 0.4,
+                          "evidence": f"mismatch 分散, 比例={mismatch_ratio:.2%}"})
+
+        # 语义加权：op_type 的 pattern_priority 里靠前的 pattern confidence 抬升
+        plist = self.op_type_info.get("pattern_priority", [])
+        if plist:
+            for h in hints:
+                if h["pattern"] in plist:
+                    rank = plist.index(h["pattern"])
+                    boost = max(0, 0.1 - rank * 0.03)
+                    h["confidence"] = min(0.99, h["confidence"] + boost)
+                    h["semantic_boosted"] = True
+
+        hints.sort(key=lambda h: h["confidence"], reverse=True)
+        return {
+            "primary_hint": hints[0]["pattern"],
+            "primary_confidence": hints[0]["confidence"],
+            "primary_evidence": hints[0]["evidence"],
+            "all_hints": hints,
+        }
+
+    def _check_tail_spike(self, mm, shape):
+        ld = shape[-1]
+        for ts in [8, 16, 32, 64, 128, 256]:
+            if ld <= ts:
+                continue
+            tl = ld % ts
+            if tl == 0:
+                continue
+            t_s = tuple([slice(None)] * (len(shape) - 1) + [slice(-tl, None)])
+            b_s = tuple([slice(None)] * (len(shape) - 1) + [slice(0, -tl)])
+            tr = float(np.mean(mm[t_s]))
+            br = float(np.mean(mm[b_s]))
+            if tr > 0.3 and (br < 0.01 or tr > br * 5):
+                return {"pattern": "tail_spike",
+                        "confidence": min(0.9, 0.6 + (tr - br)),
+                        "evidence": f"last_dim={ld}, tile={ts}, 尾块({tl})={tr:.1%}, 主体={br:.1%}",
+                        "detail": {"tile_size": ts, "tail_len": tl,
+                                   "tail_rate": tr, "body_rate": br}}
+        return None
+
+    def _check_dim_concentration(self, mm, shape):
+        for dim in range(len(shape)):
+            if shape[dim] <= 1:
+                continue
+            rates = [float(np.mean(mm[tuple([slice(None)] * dim + [i]
+                                           + [slice(None)] * (len(shape) - dim - 1))]))
+                     for i in range(shape[dim])]
+            ra = np.array(rates)
+            if np.max(ra) > 0.5 and np.min(ra) < 0.1:
+                bad = [int(i) for i in np.where(ra > 0.3)[0]]
+                return {"pattern": "dimension_concentration", "confidence": 0.8,
+                        "evidence": f"dim={dim}(size={shape[dim]}), 索引 {bad} mismatch 偏高",
+                        "detail": {"dim": dim, "bad_indices": bad,
+                                   "rates": [round(r, 4) for r in rates]}}
+        return None
+
+    def _check_magnitude_correlation(self, golden, mm):
+        gf, mf = np.abs(golden.flatten()), mm.flatten()
+        if np.sum(mf) < 10 or np.sum(~mf) < 10:
+            return None
+        mmv, nmv = float(np.mean(gf[mf])), float(np.mean(gf[~mf]))
+        if nmv < 1e-10:
+            return None
+        ratio = mmv / nmv
+        if ratio > 3.0:
+            return {"pattern": "magnitude_correlated",
+                    "confidence": min(0.85, 0.5 + (ratio - 3) * 0.05),
+                    "evidence": f"mismatch 均值({mmv:.4f})是正常({nmv:.4f})的{ratio:.1f}倍"}
+        if ratio < 0.3:
+            return {"pattern": "magnitude_correlated",
+                    "confidence": min(0.85, 0.5 + (1 / ratio - 3) * 0.05),
+                    "evidence": f"mismatch 集中在小值区域"}
+        return None
+
+    def _check_boundary_concentration(self, mm, shape):
+        if len(shape) < 2:
+            return None
+        tm = int(np.sum(mm))
+        if tm == 0:
+            return None
+        bm, bt = 0, 0
+        for dim in range(len(shape)):
+            if shape[dim] <= 2:
+                continue
+            for edge in [0, shape[dim] - 1]:
+                s = tuple([slice(None)] * dim + [edge]
+                          + [slice(None)] * (len(shape) - dim - 1))
+                bm += int(np.sum(mm[s]))
+                bt += mm[s].size
+        if bt > 0 and tm > 0 and bm / tm > 0.6 and bm / bt > 0.2:
+            return {"pattern": "boundary_concentration", "confidence": 0.75,
+                    "evidence": f"边界含 {bm/tm:.0%} 的 mismatch"}
+        return None
+
+    # ---- L4 ----
+
+    def _worst_elements(self, abs_diff, golden, actual, top_k=10):
+        flat = abs_diff.flatten()
+        k = min(top_k, len(flat))
+        idx = np.argpartition(flat, -k)[-k:]
+        idx = idx[np.argsort(flat[idx])[::-1]]
+        return [{"index": list(map(int, np.unravel_index(i, abs_diff.shape))),
+                 "abs_diff": float(flat[i]),
+                 "golden_value": float(golden.flat[i]),
+                 "actual_value": float(actual.flat[i]),
+                 "L7_gm_offset": None, "L7_source_line": None} for i in idx]
+
+    def _tail_analysis(self, abs_diff, mm, shape):
+        ld = shape[-1]
+        results = {}
+        for ts in [8, 16, 32, 64, 128, 256]:
+            tl = ld % ts
+            if tl == 0 or ld <= ts:
+                continue
+            t_s = tuple([slice(None)] * (len(shape) - 1) + [slice(-tl, None)])
+            b_s = tuple([slice(None)] * (len(shape) - 1) + [slice(0, -tl)])
+            results[f"tile_{ts}"] = {
+                "tail_len": tl,
+                "tail_mean_diff": float(np.mean(abs_diff[t_s])),
+                "body_mean_diff": float(np.mean(abs_diff[b_s])),
+                "tail_max_diff": float(np.max(abs_diff[t_s])),
+                "body_max_diff": float(np.max(abs_diff[b_s])),
+                "tail_mismatch_rate": float(np.mean(mm[t_s])),
+                "body_mismatch_rate": float(np.mean(mm[b_s])),
+            }
+        if not results:
+            return {"last_dim": ld, "note": "last_dim 是常见 tile 的整数倍"}
+        results["last_dim"] = ld
+        return results
+
+    def _dimension_analysis(self, abs_diff, mm, shape):
+        analysis = []
+        for dim in range(len(shape)):
+            if shape[dim] <= 1:
+                continue
+            rates, diffs = [], []
+            for i in range(shape[dim]):
+                s = tuple([slice(None)] * dim + [i]
+                          + [slice(None)] * (len(shape) - dim - 1))
+                rates.append(float(np.mean(mm[s])))
+                diffs.append(float(np.mean(abs_diff[s])))
+            analysis.append({
+                "dim": dim, "size": shape[dim],
+                "mismatch_rate_min": float(np.min(rates)),
+                "mismatch_rate_max": float(np.max(rates)),
+                "mismatch_rate_std": float(np.std(rates)),
+                "mean_diff_min": float(np.min(diffs)),
+                "mean_diff_max": float(np.max(diffs)),
+                "per_index_rates": [round(r, 4) for r in rates] if shape[dim] <= 64 else None,
+            })
+        return analysis
 
 
 # ============================================================
