@@ -553,6 +553,40 @@ class DiffAnalyzer:
 
 
 # ============================================================
+# L6: 内存布局分析
+# ============================================================
+#
+# 不触发 NPU 操作，只读 tensor.shape/stride/dtype/是否连续/最后一维对齐情况。
+# 用于 Sub-step 2.1 [FORENSICS_SUMMARY] 中 L6 内存布局一节。
+
+class MemoryLayoutAnalyzer:
+
+    TILE_SIZES = [8, 16, 32, 64, 128, 256]
+
+    def analyze_tensors(self, tensors: list, label: str = "input") -> list:
+        results = []
+        for i, t in enumerate(tensors):
+            if not isinstance(t, torch.Tensor):
+                continue
+            results.append(self._analyze_single(t, f"{label}_{i}"))
+        return results
+
+    def _analyze_single(self, t: torch.Tensor, name: str) -> dict:
+        info = {
+            "name": name, "shape": list(t.shape), "stride": list(t.stride()),
+            "dtype": str(t.dtype), "is_contiguous": t.is_contiguous(),
+            "storage_offset": t.storage_offset(),
+            "element_size_bytes": t.element_size(),
+        }
+        last_dim = t.shape[-1] if t.ndim > 0 else 0
+        info["last_dim_alignment"] = {
+            f"tile_{ts}": {"remainder": last_dim % ts, "aligned": last_dim % ts == 0}
+            for ts in self.TILE_SIZES
+        }
+        return info
+
+
+# ============================================================
 # 主入口
 # ============================================================
 
